@@ -1,0 +1,11 @@
+numpy==2.2.6
+scipy
+scikit-learn==1.7.2
+pandas
+lightgbm==4.7.0
+xgboost==3.2.0
+matplotlib
+jupyter
+pytest
+torch==2.14.1
+tabicl==2.2.0
