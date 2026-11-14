@@ -51,7 +51,7 @@ echo 'export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1' >> .venv/bin/activate
 Play in the terminal (optional seed as an argument):
 
 ```bash
-python -m inf_minesweeper.board 42
+python -m inf_minesweeper.board seed
 ```
 
 Commands: `r x y` reveal, `f x y` flag or unflag, `c x y` chord, `v x y` move
