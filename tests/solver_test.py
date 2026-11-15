@@ -61,3 +61,10 @@ def test_solver_stays_in_region():
     solver.solve()
     x0, y0, x1, y1 = region
     assert all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in board.flagged)
+    
+    
+def test_sector_region_is_centered_and_whole():
+    board = Board(0)
+    assert sector_region(board, 1, (4, 4)) == (-8, -8, 15, 15)
+    assert sector_region(board, 2, (4, 4)) == (-16, -16, 23, 23)
+    assert sector_region(board, 0, (-1, -1)) == (-8, -8, -1, -1)

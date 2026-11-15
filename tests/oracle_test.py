@@ -67,7 +67,8 @@ def test_matches_brute_force_on_real_positions():
 
 
 def test_budget_gives_nan():
-    solver = stuck_solver(0)
+    # some seeds are solved by deduction alone, so find one that needs a guess
+    solver = next(s for s in map(stuck_solver, range(20)) if s.frontier())
     q = frontier_proba(solver, max_nodes=1)
     assert q and all(math.isnan(v) for v in q.values())
     

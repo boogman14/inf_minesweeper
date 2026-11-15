@@ -25,15 +25,17 @@ that a bad guess costs more than the points it forfeits.
 1. How close can a model trained on a k×k window get to the exact mine
    probability on cells that require a guess?
 2. How does that accuracy change as the window grows from 3×3 to 9×9?
-3. Does a better probability estimate clear more sectors per game?
+3. Does a better probability estimate raise the game score (more sectors
+   cleared, fewer locked)?
 
 ## Status
 
 | Module | Purpose | State |
 | --- | --- | --- |
-| `board.py` | Infinite board, game rules, sectors, terminal game | Done |
-| `solver.py` | Deterministic solver that plays every simple certain move | Done |
+| `board.py` | Infinite board, endless and hardcore rules, sectors, scoring, terminal game | Done |
+| `solver.py` | Deterministic solver that plays every simple certain move; full-game autoplay | Done |
 | `oracle.py` | Exact mine probability for every frontier cell | Done |
+| `scripts/screenshot_density.py` | Mine density from app screenshots | Done |
 | `simulate.py` | Plays games and logs forced-guess positions as data | Next |
 | `features.py` | k×k windows, one-hot encoding, rotations and reflections | Planned |
 | `models.py` | Logistic regression, tree ensembles, CNN | Planned |
@@ -77,7 +79,7 @@ Solve a board and get exact probabilities at the stuck position:
 ```python
 from inf_minesweeper.board import Board, render_labeled
 from inf_minesweeper.solver import Solver, sector_region, autoplay
-from inf_minesweeper.oracle import frontier_probabilities
+from inf_minesweeper.oracle import frontier_proba
 
 board = Board(seed=0)        # density defaults to the measured 0.21
 solver = Solver(board, sector_region(board, radius=1, center=(4, 4)))
@@ -85,29 +87,53 @@ solver.reveal(4, 4)          # first click
 solver.solve()               # every simple certain move
 print(render_labeled(board, 4, 4, view=14))
 
-probs = frontier_probabilities(solver)   # {cell: P(mine)}
+probs = frontier_proba(solver)   # {cell: P(mine)}
 print(min(probs.items(), key=lambda kv: kv[1]))  # safest guess
 
 print(autoplay(Board(seed=1)))           # full endless game, random guesses
 ```
 
-Run the tests:
+Run the tests (17 tests, about 15 seconds):
 
 ```bash
 pytest
 ```
+
+Re-estimate the mine density from screenshots (needs Pillow):
+
+```bash
+python scripts/screenshot_density.py data/screenshots/*.png
+```
+
+Check that a copy of the code reproduces the reference board and solver:
+
+```bash
+python -c "
+from inf_minesweeper.board import Board
+from inf_minesweeper.solver import Solver, sector_region
+b = Board(0, density=0.2)
+print(sum(b.is_mine(x, y) for x in range(50) for y in range(50)))
+S = Solver(b, sector_region(b, 1, (4, 4)))
+S.reveal(4, 4); S.solve()
+print(len(b.revealed), len(b.flagged), len(S.frontier()))"
+```
+
+Expected output: `544`, then `523 96 14`.
 
 ## How it works
 
 **Board.** Mines are never stored. Whether a cell holds a mine is a seeded
 hash of its coordinates compared with the density, so memory grows only with
 the cells touched and any game replays exactly from its seed. The first-click
-rule is configurable: `none`, `safe`, or `zero`.
+rule is configurable: `none`, `safe`, or `zero`. A cell shows one of 13 states
+to the player: a number 0 to 8, hidden, flagged, mine hit, or wrong flag.
 
 **Solver.** Sees only what a player sees. It applies two sound rules: a single
 number whose remaining neighbors are all safe or all mines, and pairs of
 overlapping numbers. It works inside a box of sectors, because on an infinite
-board deduction almost never stalls everywhere at once.
+board deduction almost never stalls everywhere at once. In a locked sector it
+treats the mine that was hit as a known mine and marked wrong flags as known
+safe cells, and it never plays there.
 
 **Oracle.** Mines are independent and there is no global mine count, so
 frontier cells that share no number are independent. Each connected piece is
@@ -158,9 +184,10 @@ run at 0.20 and have not been rerun.
 
 ```
 src/inf_minesweeper/   package code
-tests/                 pytest tests
+tests/                 pytest tests (*_test.py)
 notebooks/             exploration and modeling notebooks
 scripts/               one-off analysis scripts
+data/screenshots/      app screenshots used for the density estimate
 data/                  simulated datasets (not tracked)
 results/               figures and tables (not tracked)
 ```

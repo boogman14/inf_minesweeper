@@ -32,8 +32,8 @@ def sector_region(board:Board, radius:int = 2, center:Cell = (0, 0)) -> Region:
     sx, sy = board.sector_of(*center)
     return ((sx - radius) * s,
             (sy - radius) * s,
-            (sx + radius) * s - 1,
-            (sy + radius) * s - 1)
+            (sx + radius + 1) * s - 1,
+            (sy + radius + 1) * s - 1)
     
 
 @dataclass
@@ -48,7 +48,7 @@ class Solver:
     def __init__(self, board:Board, region:Region) -> None:
         self.board = board
         self.region = region
-        self.active: set[Cell] = set()
+        self._active: set[Cell] = set()
         self.sync()
         
     # ------------------------------------------------------------- tracking
@@ -60,7 +60,13 @@ class Solver:
         if self.region is None:
             return True
         x0, y0, x1, y1 = self.region
-        return (x0 <= c[0] <= x1) and (y0 <= c[1] <= y1)
+        return x0 <= c[0] <= x1 and y0 <= c[1] <= y1
+    
+    def playable(self, c: Cell) -> bool:
+        """Inside the region and not in a locked sector. Cells in locked
+        sectors still appear in constraints (they carry information) but can
+        never be revealed or flagged."""
+        return self.in_region(c) and not self.board.is_locked(*c)
     
     # -------------------------------------------------------------- actions
     def reveal(self, x:int, y:int) -> list[Cell]:
@@ -77,55 +83,58 @@ class Solver:
             
     # ---------------------------------------------------------- constraints
     def constraints(self) -> dict[frozenset[Cell], int]:
-        """
-        """
+        """Map {unknown cells} -> number of mines among them.
+
+        One entry per revealed number that still borders unknown cells;
+        duplicates collapse. Numbers with no unknown neighbors are retired."""
         out: dict[frozenset[Cell], int] = {}
         done = []
         for c in self._active:
             unknown = []
             flags = 0
             for nb in neighbors(*c):
-                if nb in self.board.flagged:
+                if self.board.known_mine(nb):
                     flags += 1
-                elif nb not in self.board.revealed:
+                elif self.board.is_unknown(nb):
                     unknown.append(nb)
             if not unknown:
                 done.append(c)
                 continue
             mines = self.board.revealed[c] - flags
-            if not (0 <= mines <= len(unknown)):
+            if not 0 <= mines <= len(unknown):
                 raise ValueError(f"flags around {c} contradict its number")
             out[frozenset(unknown)] = mines
         self._active.difference_update(done)
         return out
     
     def frontier(self) -> set[Cell]:
-        """
-        """
+        """Unknown, playable cells that touch a revealed number: the guess
+        candidates."""
         cells: set[Cell] = set()
         for group in self.constraints():
             cells |= group
-        return {c for c in cells if self.in_region(c)}
+        return {c for c in cells if self.playable(c)}
     
     # ------------------------------------------------------------ deduction
     def deduce(self) -> tuple[set[Cell], set[Cell]]:
-        """One round of both rules."""
+        """One round of both rules. Returns (safe cells, mine cells), limited
+        to the region."""
         cons = self.constraints()
         safe: set[Cell] = set()
         mines: set[Cell] = set()
-        
-        # Rule 1: single constraint
+
+        # Rule 1: single constraint.
         for cells, m in cons.items():
             if m == 0:
                 safe |= cells
             elif m == len(cells):
                 mines |= cells
-        safe = {c for c in safe if self.in_region(c)}
-        mines = {c for c in mines if self.in_region(c)}
+        safe = {c for c in safe if self.playable(c)}
+        mines = {c for c in mines if self.playable(c)}
         if safe or mines:
             return safe, mines
-        
-        # Rule 2: pairs of constraints that share a cell
+
+        # Rule 2: pairs of constraints that share a cell.
         by_cell: dict[Cell, list[frozenset[Cell]]] = {}
         for cells in cons:
             for c in cells:
@@ -137,13 +146,16 @@ class Solver:
                 if ma - cons[b] == len(only_a):
                     mines |= only_a
                     safe |= b - a
-        safe = {c for c in safe if self.in_region(c)}
-        mines = {c for c in mines if self.in_region(c)}
+        safe = {c for c in safe if self.playable(c)}
+        mines = {c for c in mines if self.playable(c)}
         return safe, mines
-    
-    def solve(self, max_revealed:int | None = None) -> SolveResult:
-        """Play every deducible move until stuck or `max_revealed` cells on the current view is reached."""
+
+    def solve(self, max_revealed: int | None = None) -> SolveResult:
+        """Play every deducible move until stuck (or until `max_revealed`
+        cells are open on the board). Without a region or a cap this may
+        never return."""
         revealed = flagged = passes = 0
+        hits = len(self.board.hits)
         while self.board.alive:
             if max_revealed is not None and len(self.board.revealed) >= max_revealed:
                 break
@@ -156,7 +168,7 @@ class Solver:
             flagged += len(mines)
             for c in safe:
                 revealed += len(self.reveal(*c))
-                if not self.board.alive:
+                if len(self.board.hits) > hits:
                     raise RuntimeError(f"solver bug: 'safe' cell {c} was a mine")
         return SolveResult(revealed, flagged, passes)
     
@@ -176,8 +188,11 @@ def random_guesser(rng: random.Random) -> Guesser:
 class GameResult:
     alive: bool
     guesses: int
+    mines_hit: int
     revealed: int
     sectors_cleared: int
+    sectors_locked: int
+    score: float
 
 
 def autoplay(
@@ -211,6 +226,9 @@ def autoplay(
     return GameResult(
         alive=board.alive,
         guesses=guesses,
+        mines_hit=len(board.hits),
         revealed=len(board.revealed),
-        sectors_cleared=len(board.cleared_sectors())
+        sectors_cleared=len(board.cleared_sectors()),
+        sectors_locked=len(board.locked),
+        score=board.score(),
     )

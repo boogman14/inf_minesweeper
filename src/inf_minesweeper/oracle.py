@@ -165,4 +165,4 @@ def mine_proba(constraints: Constraints, density: float, max_nodes: int = 2_000_
 def frontier_proba(solver: Solver, max_nodes: int = 2_000_000) -> dict[Cell, float]:
     """Orcale probabilities for the solver's `region`"""
     probs = mine_proba(solver.constraints(), solver.board.density, max_nodes)
-    return {c: q for c, q in probs.items() if solver.in_region(c)}
+    return {c: q for c, q in probs.items() if solver.playable(c)}

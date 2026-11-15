@@ -1,6 +1,7 @@
 .venv/
 .vscode/
-data/
+data/*
+!data/screenshots
 results/
 __pycache__/
 .ipynb_checkpoints/
