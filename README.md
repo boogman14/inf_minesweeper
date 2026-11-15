@@ -6,7 +6,19 @@ safe move can be deduced, how well can a model that sees only a local window
 of the board estimate the probability that a hidden cell is a mine?
 
 The game modeled here is Infinite Minesweeper: an unbounded board, split into
-10×10 sectors. A sector is cleared when all of its mines are flagged correctly.
+8×8 sectors. A sector is cleared when all of its mines are flagged correctly.
+
+The project models the game's endless mode. Revealing a mine locks that
+mine's sector for good: nothing in it can be revealed or flagged again, its
+incorrect flags are marked, and what was already revealed stays visible as
+clues for neighboring sectors. Openings that spread from other sectors stop at
+its edge. Play continues elsewhere. A hardcore mode, where one mine ends the
+game, is also available (`mode="hardcore"`).
+
+Scoring: a cleared sector earns one point per mine in it, as in the app. A
+locked sector is lost permanently. The app has no further penalty; this
+project subtracts 5 points per locked sector (`lock_penalty` on `Board`) so
+that a bad guess costs more than the points it forfeits.
 
 ## Questions
 
@@ -48,15 +60,17 @@ echo 'export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1' >> .venv/bin/activate
 
 ## Usage
 
-Play in the terminal (optional seed as an argument):
+Play in the terminal (optional seed and mode as arguments):
 
 ```bash
-python -m inf_minesweeper.board seed
+python -m inf_minesweeper.board 42
+python -m inf_minesweeper.board 42 hardcore
 ```
 
 Commands: `r x y` reveal, `f x y` flag or unflag, `c x y` chord, `v x y` move
 the view, `m` show mines, `h` help, `q` quit. x is the column, y is the row,
-and y grows downward.
+and y grows downward. After the first click, only cells that touch a revealed
+cell can be played, as in the app.
 
 Solve a board and get exact probabilities at the stuck position:
 
@@ -65,16 +79,16 @@ from inf_minesweeper.board import Board, render_labeled
 from inf_minesweeper.solver import Solver, sector_region, autoplay
 from inf_minesweeper.oracle import frontier_probabilities
 
-board = Board(seed=0, density=0.2)
-solver = Solver(board, sector_region(board, radius=1, center=(5, 5)))
-solver.reveal(5, 5)          # first click
+board = Board(seed=0)        # density defaults to the measured 0.21
+solver = Solver(board, sector_region(board, radius=1, center=(4, 4)))
+solver.reveal(4, 4)          # first click
 solver.solve()               # every simple certain move
-print(render_labeled(board, 5, 5, view=14))
+print(render_labeled(board, 4, 4, view=14))
 
 probs = frontier_probabilities(solver)   # {cell: P(mine)}
 print(min(probs.items(), key=lambda kv: kv[1]))  # safest guess
 
-print(autoplay(Board(seed=1)))           # full game with random guesses
+print(autoplay(Board(seed=1)))           # full endless game, random guesses
 ```
 
 Run the tests:
@@ -101,22 +115,43 @@ solved exactly by enumerating the layouts consistent with the numbers,
 weighted by density. Cells that touch the same numbers are merged into groups,
 which keeps the search fast. Pieces that exceed a search budget return NaN.
 
+## Mine density in the app
+
+Estimated from four screenshots of cleared sectors, where every hidden cell is
+a flagged mine (`scripts/screenshot_density.py` locates the sector lines and
+classifies each cell). Sectors containing anything else, such as unfinished
+cells or icons, were dropped.
+
+- 58 distinct cleared sectors, 786 mines in 3,712 cells: density 0.212, with
+  a 95% interval of about 0.20 to 0.23. The simulator uses 0.21.
+- Mines per sector range from 6 to 21, with mean 13.6 and variance 9.8. A
+  binomial count at this density has variance 10.7, so the data fit
+  independent placement and rule out a fixed number of mines per sector.
+- Caveat: only cleared sectors are counted. Dense sectors are more likely to
+  end up locked, so the true density may be slightly higher.
+
 ## Findings so far
 
-All at density 0.2, which is a placeholder until the app's real density is
-measured.
+The policy comparison uses the measured density, 0.21. The other numbers were
+run at 0.20 and have not been rerun.
 
 - An unbounded solver does not stop: runs were still going past 100,000
-  revealed cells. Games are therefore played in a 5×5 block of sectors.
-- Random guessing ends games quickly: a median of 1 guess per game, with 20 of
-  25 sectors cleared. At density 0.25 the median drops to 5 sectors.
+  revealed cells. Games are therefore played in a 5×5 block of sectors (40×40
+  cells).
+- Guess quality shows up in the score. Over 100 endless games per policy in a
+  25-sector box, random guessing clears a mean of 19.2 sectors, locks 3.9, and
+  scores 227; always taking the oracle's safest cell clears 22.0, locks 2.0,
+  and scores 277. The gap between those two is what the learned models
+  compete for.
+- Density matters. With random guessing, the mean number of locked sectors is
+  0.6 at density 0.15, 3.0 at 0.20, and 8.1 at 0.25.
 - The oracle is calibrated against the true mines. Over 1,500 stuck positions
-  (about 57,600 cells), the mean predicted probability and the actual mine
-  rate are both 0.4001.
-- The solver's two rules are incomplete. In 63% of stuck positions the oracle
+  (about 49,500 cells), the mean predicted probability is 0.397 and the
+  actual mine rate is 0.398.
+- The solver's two rules are incomplete. In 56% of stuck positions the oracle
   finds a cell that is certainly safe. A forced guess is therefore defined by
   the oracle (no certain-safe cell left), not by the solver stalling.
-- The oracle takes a median of 4 ms per position; 0.4% of cells hit the
+- The oracle takes a median of 3 ms per position; 0.4% of cells hit the
   search budget.
 
 ## Layout
@@ -125,15 +160,40 @@ measured.
 src/inf_minesweeper/   package code
 tests/                 pytest tests
 notebooks/             exploration and modeling notebooks
+scripts/               one-off analysis scripts
 data/                  simulated datasets (not tracked)
 results/               figures and tables (not tracked)
 ```
 
 ## Next steps
 
-1. Estimate the app's mine density from screenshots of cleared sectors.
+1. Score only interior sectors: sectors on the edge of the play box can be
+   impossible to finish because the solver may not act outside the box.
 2. `simulate.py`: reveal oracle-certain cells, log each forced-guess position
    with its game id and seed, split train and test by game.
 3. Baselines: constant density, logistic regression on simple features.
 4. Tree ensembles and a CNN; evaluate by excess log-loss over the oracle,
-   calibration, guess regret, and sectors cleared.
+   calibration, guess regret, and game score.
+
+## Later ideas
+
+Outside the scope of this project:
+
+- Timed mode: clear as many sectors as possible before the clock runs out.
+  This turns guessing into a speed trade-off, since a slow exact answer can
+  score worse than a fast approximate one.
+- First-click initialization: how the first-click rule biases mine density
+  near the start, and whether models lose calibration there.
+
+## References
+
+1. Infinite Minesweeper (iOS game), App Store page:
+   https://apps.apple.com/app/id6476042029
+   The game this project models: sector scoring, the first-click rule, and the
+   mine density used by the simulator.
+2. Seeded, "Minesweeper Cheats on Your First Click" (YouTube Short):
+   https://www.youtube.com/shorts/RcypVbPEprE
+   How Minesweeper adjusts the board on the first click; background for the
+   `first_click` option.
+
+<!-- Add further references below: papers, videos, solver write-ups. -->

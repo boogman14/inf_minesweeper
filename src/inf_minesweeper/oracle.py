@@ -45,7 +45,8 @@ def components(constraints: Constraints) -> list[Constraints]:
         if start in seen:
             continue
         seen.add(start)
-        stack, comp = [start], {}
+        stack: list[frozenset[Cell]] = [start]
+        comp: Constraints = {}
         while stack:
             cur = stack.pop()
             comp[cur] = constraints[cur]

@@ -25,14 +25,14 @@ def brute_force(constraints, density):
 
 def stuck_solver(seed, density=0.2, radius=1):
     board = Board(seed, density=density)
-    solver = Solver(board, sector_region(board, radius, (5, 5)))
-    solver.reveal(5, 5)
+    solver = Solver(board, sector_region(board, radius, (4, 4)))
+    solver.reveal(4, 4)
     solver.solve()
     return solver
 
 
 def test_hand_example():
-    # one number seeign two cells with one mine: 50/50 at any density
+    # one number seeing two cells with one mine: 50/50 at any density
     a, b = (0, 0), (1, 0)
     q = mine_proba({frozenset({a, b}): 1}, 0.2)
     assert math.isclose(q[a], 0.5) and math.isclose(q[b], 0.5)

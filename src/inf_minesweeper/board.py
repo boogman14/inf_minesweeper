@@ -16,11 +16,18 @@ from __future__ import annotations
 from collections import deque
 from typing import Iterator
 
-# Cell-state codes shared with features.py (11 categories).
-# 0-8 = revealed number, HIDDEN = unrevealed, FLAGGED = flagged.
+# Cell-state codes shared with features.py (13 categories).
+# 0-8 = revealed number, HIDDEN = non-revealed, FLAGGED = flagged
+# The last two only appear in locked sectors (endless mode)
+# MINE_HIT = mine was stepped on... BOOM!
+# WRONG_FLAG = incorrectly placed flag (known to be safe but number is uncertain)
 HIDDEN = 9
 FLAGGED = 10
-N_STATES = 11
+MINE_HIT = 11
+WRONG_FLAG = 12
+N_STATES = 13
+
+GAME_MODES = ("endless", "hardcore")
 
 FIRST_CLICK_RULES = ("none", "safe", "zero")
 
@@ -64,6 +71,20 @@ class Board:
         click always opens an area.
         Mines are removed from the protected zone rather than relocated; on an
         infinite board relocation would not change anything measurable.
+    mode : {"endless", "hardcore"}
+        "endless": revealing a mine locks that mine's sector for good. Nothing
+        in a locked sector can be revealed or flagged again, its wrong flags
+        are marked, and everything already revealed there stays visible as
+        clues for neighboring sectors. An opening that spreads from another
+        sector stops at a locked sector's edge. The game goes on.
+        "hardcore": revealing a mine ends the game.
+    adjacent_only : bool
+        After the first click, only cells that touch a revealed cell can be
+        revealed or flagged (the app's rule).
+    sector_points, lock_penalty : float
+        Scoring. Each cleared sector earns `sector_points`; each locked sector
+        is lost for good and also costs `lock_penalty`. The defaults (1 and 1)
+        are placeholders; set them to the app's values.
     sector_size : int
         Side length of a scoring sector (10 in the app).
     max_flood : int
@@ -76,6 +97,10 @@ class Board:
         seed: int,
         density: float = 0.2,
         first_click: str = "zero",
+        mode: str = "endless",
+        adjacent_only: bool = True,
+        sector_points: float = 12.0,
+        lock_penalty: float = 5.0,
         sector_size: int = 8,
         max_flood: int = 1_000_000,
     ) -> None:
@@ -83,10 +108,15 @@ class Board:
             raise ValueError("density must be in (0, 1)")
         if first_click not in FIRST_CLICK_RULES:
             raise ValueError(f"first_click must be one of {FIRST_CLICK_RULES}")
+        if mode not in GAME_MODES:
+            raise ValueError(f"mode must be in {GAME_MODES}")
 
         self.seed = seed
         self.density = density
         self.first_click = first_click
+        self.mode = mode
+        self.adjacent_only = adjacent_only
+        self.lock_penalty = lock_penalty
         self.sector_size = sector_size
         self.max_flood = max_flood
 
@@ -100,6 +130,9 @@ class Board:
 
         self.alive = True
         self.exploded: tuple[int, int] | None = None
+        self.hits: set[tuple[int, int]] = set()
+        self.wrong_flags: set[tuple[int, int]] = set()
+        self.locked: set[tuple[int, int]] = set()
 
         # Cached ground-truth mine sets per sector.
         self._sector_mines: dict[tuple[int, int], frozenset[tuple[int, int]]] = {}
@@ -118,19 +151,45 @@ class Board:
 
     # ---------------------------------------------------------- player view
     def state(self, x: int, y: int) -> int:
-        """What the player sees at (x, y): 0-8, HIDDEN, or FLAGGED."""
-        if (x, y) in self.revealed:
-            return self.revealed[(x, y)]
-        if (x, y) in self.flagged:
+        """What the player sees at (x, y): 0-8, HIDDEN, FLAGGED, MINE_HIT, or WRONG_FLAG."""
+        c = (x, y)
+        if c in self.revealed:
+            return self.revealed[c]
+        if c in self.hits:
+            return MINE_HIT
+        if c in self.wrong_flags:
+            return WRONG_FLAG
+        if c in self.flagged:
             return FLAGGED
         return HIDDEN
+    
+    def known_mine(self, c: tuple[int, int]) -> bool:
+        return c in self.flagged or c in self.hits
+    
+    def is_unknown(self, c: tuple[int, int]) -> bool:
+        return (c not in self.revealed and c not in self.flagged and
+                c not in self.hits and c not in self.wrong_flags)
+        
+    def is_locked(self, x: int, y: int) -> bool:
+        return self.sector_of(x, y) in self.locked
+    
+    def touches_revealed(self, x: int, y: int) -> bool:
+        return any(c in self.revealed for c in neighbors(x, y))
+    
+    def can_act(self, x: int, y: int) -> bool:
+        """True if the rules allow revealing or flagging (x, y) right now."""
+        if not self.alive or self.is_locked(x, y):
+            return False
+        if self.start is None or not self.adjacent_only:
+            return True
+        return self.touches_revealed(x, y)
 
     def frontier(self) -> set[tuple[int, int]]:
         """Hidden, unflagged cells that touch at least one revealed cell."""
         out = set()
         for x, y in self.revealed:
             for c in neighbors(x, y):
-                if c not in self.revealed and c not in self.flagged:
+                if self.is_unknown(c) and not self.is_locked(*c):
                     out.add(c)
         return out
 
@@ -142,22 +201,29 @@ class Board:
         mine ends the game: `alive` becomes False and `exploded` is set.
         """
         self._check_alive()
-        if (x, y) in self.revealed or (x, y) in self.flagged:
+        if not self.is_unknown((x, y)) or not self.can_act(x, y):
             return []
         if self.start is None:
             self._place_start(x, y)
         if self.is_mine(x, y):
-            self.alive = False
             self.exploded = (x, y)
+            self.hits.add((x, y))
+            if self.mode == "hardcore":
+                self.alive = False
+            else:
+                self._lock(self.sector_of(x, y))
             return []
         return self._flood(x, y)
 
     def toggle_flag(self, x: int, y: int) -> None:
         self._check_alive()
-        if (x, y) in self.revealed:
-            return
-        self.flagged.symmetric_difference_update({(x, y)})
-
+        c = (x, y)
+        if c in self.flagged:
+            if not self.is_locked(x, y):
+                self.flagged.discard(c)
+        elif self.is_unknown(c) and self.can_act(x, y):
+            self.flagged.add(c)
+            
     def chord(self, x: int, y: int) -> list[tuple[int, int]]:
         """Reveal every unflagged neighbor of a revealed number whose
         flag count already matches it. A wrong flag can end the game."""
@@ -166,13 +232,14 @@ class Board:
         if n is None:
             return []
         nbrs = list(neighbors(x, y))
-        if sum(c in self.flagged for c in nbrs) != n:
+        if sum(self.known_mine(c) for c in nbrs) != n:
             return []
         opened: list[tuple[int, int]] = []
+        hits_before = len(self.hits)
         for c in nbrs:
-            if c not in self.flagged and c not in self.revealed:
+            if self.is_unknown(c):
                 opened += self.reveal(*c)
-                if not self.alive:
+                if len(self.hits) > hits_before:
                     break
         return opened
 
@@ -200,7 +267,7 @@ class Board:
         flagged and no wrong flags. A mine-free sector (vanishingly rare at
         realistic densities) never counts as cleared."""
         mines = self.sector_mines(sx, sy)
-        if not mines:
+        if not mines or (sx, sy) in self.locked:
             return False
         return all(
             (c in self.flagged) == (c in mines) for c in self.sector_cells(sx, sy)
@@ -209,6 +276,11 @@ class Board:
     def cleared_sectors(self) -> list[tuple[int, int]]:
         touched = {self.sector_of(*c) for c in self.flagged}
         return sorted(k for k in touched if self.sector_cleared(*k))
+    
+    def score(self) -> float:
+        """One point per mine in each cleared sector, minus the penalty for each locked sector"""
+        earned = sum(len(self.sector_mines(*k)) for k in self.cleared_sectors())
+        return earned - self.lock_penalty * len(self.locked)
 
     # ------------------------------------------------------------ rendering
     def render(
@@ -225,12 +297,17 @@ class Board:
             row = []
             for x in range(x0, x1 + 1):
                 s = self.state(x, y)
-                if (x, y) == self.exploded:
+                if s == MINE_HIT:
                     ch = "X"
+                elif s == WRONG_FLAG:
+                    ch = "!"
                 elif s == FLAGGED:
                     ch = "F"
                 elif s == HIDDEN:
-                    ch = "*" if show_mines and self.is_mine(x, y) else "#"
+                    if show_mines and self.is_mine(x, y):
+                        ch = "*"
+                    else:
+                        ch = "~" if self.is_locked(x, y) else "#"
                 else:
                     ch = "." if s == 0 else str(s)
                 row.append(ch)
@@ -249,6 +326,14 @@ class Board:
         elif self.first_click == "zero":
             self._safe_zone = frozenset({(x, y), *neighbors(x, y)})
         self._sector_mines.clear()  # the safe zone changes the mine sets
+        
+    def _lock(self, sector: tuple[int, int]) -> None:
+        """Lock a sector and mark its incorrect flags."""
+        self.locked.add(sector)
+        wrong = {c for c in self.sector_cells(*sector)
+                 if c in self.flagged and not self.is_mine(*c)}
+        self.flagged -= wrong
+        self.wrong_flags |= wrong
 
     def _flood(self, x: int, y: int) -> list[tuple[int, int]]:
         opened: list[tuple[int, int]] = []
@@ -256,7 +341,7 @@ class Board:
         seen = {(x, y)}
         while queue:
             c = queue.popleft()
-            if c in self.revealed or c in self.flagged:
+            if not self.is_unknown(c) or self.is_locked(*c):
                 continue
             n = self.number(*c)
             self.revealed[c] = n
@@ -309,12 +394,19 @@ def render_labeled(
         row = [f"{y:>4} "]
         for x in xs:
             st = board.state(x, y)
-            if (x, y) == board.exploded:
+            if st == MINE_HIT:
                 ch = paint("X", "\033[41m")
+            elif st == WRONG_FLAG:
+                ch = paint("!", "\033[95m")
             elif st == FLAGGED:
                 ch = paint("F", "\033[93m")
             elif st == HIDDEN:
-                ch = paint("*", "\033[31m") if show_mines and board.is_mine(x, y) else "#"
+                if show_mines and board.is_mine(x, y):
+                    ch = paint("*", "\033[31m")
+                elif board.is_locked(x, y):
+                    ch = paint("~", "\033[90m")
+                else:
+                    ch = "#"
             elif st == 0:
                 ch = "."
             else:
@@ -325,9 +417,11 @@ def render_labeled(
 
 
 HELP = """commands (x = column, y = row; y grows downward):
-  r x y   reveal          f x y   flag / unflag
-  c x y   chord           v x y   move the view to center on (x, y)
-  m       show/hide mines  h       help    q   quit"""
+  r x y - reveal            f x y - flag / unflag
+  c x y - chord             v x y - move the view to center on (x, y)
+  m ----- show/hide mines   h ----- help        q ----- quit
+  symbols: # hidden         . empty        F flag      
+           X mine you hit   ! wrong flag   ~ locked cell"""
 
 
 def play(seed: int = 0, view: int = 10, color: bool = True, **kwargs) -> None:
@@ -338,8 +432,10 @@ def play(seed: int = 0, view: int = 10, color: bool = True, **kwargs) -> None:
     msg = HELP
     while True:
         print(render_labeled(board, cx, cy, view, show, color))
-        print(f"cleared sectors: {len(board.cleared_sectors())}   "
-              f"flags: {len(board.flagged)}   view center: ({cx}, {cy})")
+        print(f"score: {board.score():g}   "
+              f"cleared sectors: {len(board.cleared_sectors())}   "
+              f"locked: {len(board.locked)}   flags: {len(board.flagged)}   "
+              f"view center: ({cx}, {cy})")
         if msg:
             print(msg)
         if not board.alive:
@@ -365,6 +461,12 @@ def play(seed: int = 0, view: int = 10, color: bool = True, **kwargs) -> None:
             continue
         if op == "v":
             cx, cy = x, y
+        elif op in "rf" and board.is_locked(x, y):
+            msg = f"({x}, {y}) is in a locked sector"
+        elif (op in "rf" and board.start is not None and board.adjacent_only
+              and (x, y) not in board.revealed
+              and not board.touches_revealed(x, y)):
+            msg = f"({x}, {y}) doesn't touch a revealed cell"
         elif op == "r":
             if (x, y) in board.revealed:
                 msg = f"({x}, {y}) is already revealed"
@@ -372,10 +474,15 @@ def play(seed: int = 0, view: int = 10, color: bool = True, **kwargs) -> None:
                 msg = f"({x}, {y}) is flagged; unflag it first"
             else:
                 first = board.start is None
+                hits = len(board.hits)
                 opened = board.reveal(x, y)
                 if first:
                     cx, cy = x, y
-                msg = f"revealed {len(opened)} cell(s)" if board.alive else ""
+                if len(board.hits) > hits:
+                    msg = ("" if not board.alive else
+                           f"mine at ({x}, {y}): sector {board.sector_of(x, y)} is locked")
+                else:
+                    msg = f"revealed {len(opened)} cell(s)"
         elif op == "f":
             if (x, y) in board.revealed:
                 msg = f"({x}, {y}) is revealed; only hidden cells can be flagged"
@@ -395,5 +502,7 @@ def play(seed: int = 0, view: int = 10, color: bool = True, **kwargs) -> None:
 
 if __name__ == "__main__":
     import sys
+    # usage: python -m inf_minesweeper.board [seed] [endless|hardcore]
     play(seed=int(sys.argv[1]) if len(sys.argv) > 1 else 0,
+         mode=sys.argv[2] if len(sys.argv) > 2 else "endless",
          color=sys.stdout.isatty())

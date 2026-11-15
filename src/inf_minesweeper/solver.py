@@ -183,7 +183,7 @@ class GameResult:
 def autoplay(
     board: Board,
     guesser: Guesser | None = None,
-    start: Cell = (5, 5),
+    start: Cell = (4, 4),
     radius: int = 2,
     max_guesses: int = 1_000,
     on_stuck: Callable[[Solver], None] | None = None,
