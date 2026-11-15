@@ -95,11 +95,10 @@ class Board:
     def __init__(
         self,
         seed: int,
-        density: float = 0.2,
+        density: float = 0.21,
         first_click: str = "zero",
         mode: str = "endless",
         adjacent_only: bool = True,
-        sector_points: float = 12.0,
         lock_penalty: float = 5.0,
         sector_size: int = 8,
         max_flood: int = 1_000_000,

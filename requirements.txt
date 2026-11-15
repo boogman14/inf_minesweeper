@@ -9,3 +9,4 @@ jupyter
 pytest
 torch==2.14.1
 tabicl==2.2.0
+ipykernel

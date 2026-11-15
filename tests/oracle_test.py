@@ -23,7 +23,7 @@ def brute_force(constraints, density):
     return {c: mass[c] / total for c in cells}
 
 
-def stuck_solver(seed, density=0.2, radius=1):
+def stuck_solver(seed, density=0.21, radius=1):
     board = Board(seed, density=density)
     solver = Solver(board, sector_region(board, radius, (4, 4)))
     solver.reveal(4, 4)
@@ -42,7 +42,7 @@ def test_density_matters_when_mine_counts_differ():
     # Cells a, b, c. {a, b} has 1 mine, {b, c} has 1 mine
     # Layouts: b alone (1 mine) or a and c (2 mines). P(b) = r / (r + r^2)
     a, b, c = (0, 0), (1, 0), (2, 0)
-    p = 0.2
+    p = 0.21
     r = p / (1 - p)
     q = mine_proba({frozenset({a, b}): 1, frozenset({b, c}): 1}, p)
     assert math.isclose(q[b], 1 / (1 + r))
@@ -58,8 +58,8 @@ def test_matches_brute_force_on_real_positions():
             n = len({c for g in comp for c in g})
             if n > 16:
                 continue
-            want = brute_force(comp, 0.2)
-            got = mine_proba(comp, 0.2)
+            want = brute_force(comp, 0.21)
+            got = mine_proba(comp, 0.21)
             for c in want:
                 assert math.isclose(got[c], want[c], abs_tol=1e-12)
             checked += 1

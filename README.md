@@ -15,6 +15,10 @@ clues for neighboring sectors. Openings that spread from other sectors stop at
 its edge. Play continues elsewhere. A hardcore mode, where one mine ends the
 game, is also available (`mode="hardcore"`).
 
+In the app, a locked sector reopens once the sectors around it are solved.
+This project leaves locked sectors locked: the aim is to measure how good each
+guess is, and a lock that can be undone would blur that.
+
 Scoring: a cleared sector earns one point per mine in it, as in the app. A
 locked sector is lost permanently. The app has no further penalty; this
 project subtracts 5 points per locked sector (`lock_penalty` on `Board`) so
@@ -36,7 +40,8 @@ that a bad guess costs more than the points it forfeits.
 | `solver.py` | Deterministic solver that plays every simple certain move; full-game autoplay | Done |
 | `oracle.py` | Exact mine probability for every frontier cell | Done |
 | `scripts/screenshot_density.py` | Mine density from app screenshots | Done |
-| `simulate.py` | Plays games and logs forced-guess positions as data | Next |
+| `simulate.py` | Plays games and logs forced-guess positions as data | Done |
+| `loader.py` | Loads the dataset, splits by game, crops windows | Done |
 | `features.py` | k×k windows, one-hot encoding, rotations and reflections | Planned |
 | `models.py` | Logistic regression, tree ensembles, CNN | Planned |
 | `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration | Planned |
@@ -93,7 +98,26 @@ print(min(probs.items(), key=lambda kv: kv[1]))  # safest guess
 print(autoplay(Board(seed=1)))           # full endless game, random guesses
 ```
 
-Run the tests (17 tests, about 15 seconds):
+Generate a dataset (a fixed number of games, or as many as fit in a time
+budget; uses all CPU cores):
+
+```bash
+python -m inf_minesweeper.simulate --minutes 5 --out data/raw/guesses.npz
+python -m inf_minesweeper.simulate --games 2000 --out data/raw/guesses.npz
+```
+
+Load it:
+
+```python
+from inf_minesweeper.loader import load, split_by_game, crop
+
+d = load("data/raw/guesses.npz")             # "../data/raw/..." from notebooks/
+train, test = split_by_game(d["game"])       # whole games on each side
+X = crop(d["window"], 5)                     # 5x5 windows from the stored 9x9
+y, q = d["mine"], d["q"]                     # label and oracle probability
+```
+
+Run the tests (20 tests, about 15 seconds):
 
 ```bash
 pytest
@@ -153,8 +177,36 @@ cells or icons, were dropped.
 - Mines per sector range from 6 to 21, with mean 13.6 and variance 9.8. A
   binomial count at this density has variance 10.7, so the data fit
   independent placement and rule out a fixed number of mines per sector.
-- Caveat: only cleared sectors are counted. Dense sectors are more likely to
-  end up locked, so the true density may be slightly higher.
+- Selection bias is small. Only cleared sectors are counted, and dense
+  sectors are more likely to end up locked. In simulation at a true density
+  of 0.21, locked sectors average 0.25 and cleared sectors 0.2076, against
+  0.2085 for all sectors: a bias of about -0.001 when 2 to 3% of sectors are
+  locked, growing to roughly -0.005 if 10% are. Both are inside the sampling
+  error of the estimate (0.007), so 0.21 stands.
+
+## The dataset
+
+`simulate.py` plays endless games in a 7x7 block of sectors and scores the
+inner 5x5, because sectors on the edge of the play box cannot always be
+finished. In each game the solver plays its certain moves, then the oracle
+flags and reveals every cell it can prove. When nothing certain is left, the
+position is a forced guess and every candidate cell becomes one row: its 9x9
+window of visible states, its oracle probability, and whether it is a mine.
+The guess itself is the oracle's safest cell, or a random candidate 20% of
+the time.
+
+A 350-game sample (about one minute on two cores):
+
+- 4,287 forced-guess positions and 142,889 rows, about 33 candidates per
+  position and 12 guesses per game.
+- Mean oracle probability 0.4233, actual mine rate 0.4233.
+- Log-loss on these rows: 0.582 for the oracle, 0.681 for a constant equal to
+  the mine rate, 0.797 for a constant equal to the density. Learned models
+  should land between the first two.
+- Per game, 23.9 of 25 inner sectors cleared, 0.4 locked, mean score 315.
+- About 3% of games end early: the first guess locks the starting sector
+  before the opening reaches its edge, leaving nothing playable. These games
+  are kept as they are, since locked sectors never reopen here.
 
 ## Findings so far
 
@@ -194,13 +246,12 @@ results/               figures and tables (not tracked)
 
 ## Next steps
 
-1. Score only interior sectors: sectors on the edge of the play box can be
-   impossible to finish because the solver may not act outside the box.
-2. `simulate.py`: reveal oracle-certain cells, log each forced-guess position
-   with its game id and seed, split train and test by game.
-3. Baselines: constant density, logistic regression on simple features.
-4. Tree ensembles and a CNN; evaluate by excess log-loss over the oracle,
+1. `features.py`: one-hot windows, simple handcrafted features, rotations and
+   reflections.
+2. Baselines: constant density, logistic regression on simple features.
+3. Tree ensembles and a CNN; evaluate by excess log-loss over the oracle,
    calibration, guess regret, and game score.
+4. Sensitivity check: rerun the main results at densities 0.20 and 0.22.
 
 ## Later ideas
 
