@@ -114,6 +114,7 @@ def test_score_is_mines_cleared_minus_lock_penalty():
     assert res.sectors_cleared > 0
     assert res.score == earned - 4 * res.sectors_locked
 
+
 def test_openings_stop_at_locked_sectors():
     """No flood, from anywhere, reveals a cell inside a locked sector."""
     for seed in range(30):
@@ -126,3 +127,16 @@ def test_openings_stop_at_locked_sectors():
                 assert frozen.setdefault(sector, inside) == inside
 
         autoplay(board, radius=1, on_stuck=check)
+
+
+def test_marks_are_display_only():
+    from inf_minesweeper.board import render_labeled, tenths
+    board = opened_board()
+    cell = sorted(board.frontier())[0]
+    before = (dict(board.revealed), set(board.flagged))
+    plain = render_labeled(board, 4, 4, 10, color=False)
+    marked = render_labeled(board, 4, 4, 10, color=False, marks=[cell])
+    digits = render_labeled(board, 4, 4, 10, color=False, marks=tenths({cell: 0.14}))
+    assert "?" not in plain and marked.count("?") == 1
+    assert "[?" in marked and "[1" in digits
+    assert (dict(board.revealed), set(board.flagged)) == before

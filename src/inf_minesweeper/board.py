@@ -371,9 +371,15 @@ def render_labeled(
     view: int,
     show_mines: bool = False,
     color: bool = True,
+    marks=None,
 ) -> str:
-    """Board view centered on (cx, cy) with x labels on top, y labels on the
-    left, and `|` / `-` lines on sector boundaries."""
+    """Board view centered on (cx, cy) with x labels on top, y labels on the left, and `|` / `-` lines on sector boundaries.
+    
+    `marks` highlights cells for figures and debugging. It is display only and never changes the game. Pass a collection of 
+    cells to mark each with `?`, or a dict {cell: character} to choose the character, for example `tenths(probs)` to show 
+    each candidate's mine probability in tenths. Marked cells are highlighted in color, or bracketed like [?] without."""
+    if marks is not None and not isinstance(marks, dict):
+        marks = dict.fromkeys(marks, "?")
     xs = range(cx - view, cx + view + 1)
     ys = range(cy - view, cy + view + 1)
     s = board.sector_size
@@ -391,9 +397,20 @@ def render_labeled(
                 ("+" if x % s == 0 else "-") + "---" for x in xs
             ))
         row = [f"{y:>4} "]
+        closing=False
         for x in xs:
             st = board.state(x, y)
-            if st == MINE_HIT:
+            sep = "]" if closing else ("|" if x % s == 0 else " ")
+            closing=False
+            if marks and (x, y) in marks:
+                ch = str(marks[(x, y)])[:1]
+                if color:
+                    ch = paint(ch, "\033[30;106m")
+                else:
+                    row.append(sep + " [" + ch)
+                    closing = True
+                    continue
+            elif st == MINE_HIT:
                 ch = paint("X", "\033[41m")
             elif st == WRONG_FLAG:
                 ch = paint("!", "\033[95m")
@@ -410,9 +427,14 @@ def render_labeled(
                 ch = "."
             else:
                 ch = paint(str(st), _COLORS[st])
-            row.append(("|" if x % s == 0 else " ") + "  " + ch)
-        lines.append("".join(row))
+            row.append(sep + "  " + ch)
+        lines.append("".join(row) + ("]" if closing else ""))
     return "\n".join(lines)
+
+
+def tenths(probs: dict) -> dict:
+    """Marks for `render_labeled`: each cell's probability as one digit, in tenths rounded down (0.14 -> 1, 0.68 -> 6). Unknown (NaN) shows as `?`."""
+    return {c: "?" if q != q else str(min(9, int(q * 10))) for c, q in probs.items()}
 
 
 HELP = """commands (x = column, y = row; y grows downward):
