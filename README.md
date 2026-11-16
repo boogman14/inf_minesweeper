@@ -42,9 +42,9 @@ that a bad guess costs more than the points it forfeits.
 | `scripts/screenshot_density.py` | Mine density from app screenshots | Done |
 | `simulate.py` | Plays games and logs forced-guess positions as data | Done |
 | `loader.py` | Loads the dataset, splits by game, crops windows | Done |
-| `features.py` | k×k windows, one-hot encoding, rotations and reflections | Planned |
-| `models.py` | Logistic regression, tree ensembles, CNN | Planned |
-| `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration | Planned |
+| `features.py` | Handcrafted features, one-hot windows, CNN channels, rotations and reflections | Done |
+| `models.py` | Baselines done (constant, local ratio, logistic); tree ensembles and CNN planned | In progress |
+| `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration, guess quality | Done |
 
 ## Setup
 
@@ -82,7 +82,7 @@ cell can be played, as in the app.
 Solve a board and get exact probabilities at the stuck position:
 
 ```python
-from inf_minesweeper.board import Board, render_labeled
+from inf_minesweeper.board import Board, render_labeled, tenths
 from inf_minesweeper.solver import Solver, sector_region, autoplay
 from inf_minesweeper.oracle import frontier_proba
 
@@ -90,10 +90,15 @@ board = Board(seed=0)        # density defaults to the measured 0.21
 solver = Solver(board, sector_region(board, radius=1, center=(4, 4)))
 solver.reveal(4, 4)          # first click
 solver.solve()               # every simple certain move
-print(render_labeled(board, 4, 4, view=14))
 
 probs = frontier_proba(solver)   # {cell: P(mine)}
-print(min(probs.items(), key=lambda kv: kv[1]))  # safest guess
+best = min(probs, key=probs.get) # safest guess
+print(best, probs[best])
+
+# Highlight cells without changing the game: one cell, or every candidate
+# with its mine probability in tenths (0.14 shows as 1).
+print(render_labeled(board, 4, 4, view=14, marks=[best]))
+print(render_labeled(board, 4, 4, view=14, marks=tenths(probs)))
 
 print(autoplay(Board(seed=1)))           # full endless game, random guesses
 ```
@@ -117,7 +122,7 @@ X = crop(d["window"], 5)                     # 5x5 windows from the stored 9x9
 y, q = d["mine"], d["q"]                     # label and oracle probability
 ```
 
-Run the tests (20 tests, about 15 seconds):
+Run the tests (26 tests, about 20 seconds):
 
 ```bash
 pytest
@@ -208,6 +213,25 @@ A 350-game sample (about one minute on two cores):
   before the opening reaches its edge, leaving nothing playable. These games
   are kept as they are, since locked sectors never reopen here.
 
+## Baseline results
+
+Trained on 280 games and tested on 70 held-out games (31,303 rows) from the
+350-game sample. "Excess" is the expected log-loss above the oracle's, so 0
+is perfect. "Gap closed" is measured from the mine-rate constant to the
+oracle. "Hit rate" is the chance of a mine when the model picks the guess.
+
+| Model | Log-loss | Excess | Gap closed | Hit rate |
+| --- | --- | --- | --- | --- |
+| Constant, board density 0.21 | 0.802 | 0.217 | | 0.44 |
+| Constant, training mine rate | 0.683 | 0.099 | 0% | 0.44 |
+| Local ratio (no fitting) | 0.654 | 0.069 | 30% | 0.31 |
+| Logistic regression, 8 features | 0.646 | 0.061 | 38% | 0.30 |
+| Oracle | 0.589 | 0 | 100% | 0.20 |
+
+The local ratio reads each touching number on its own, as mines still needed
+over unknown cells around it, and averages them. Constant models cannot rank
+cells, so their hit rate is that of a random pick.
+
 ## Findings so far
 
 The policy comparison uses the measured density, 0.21. The other numbers were
@@ -246,12 +270,10 @@ results/               figures and tables (not tracked)
 
 ## Next steps
 
-1. `features.py`: one-hot windows, simple handcrafted features, rotations and
-   reflections.
-2. Baselines: constant density, logistic regression on simple features.
-3. Tree ensembles and a CNN; evaluate by excess log-loss over the oracle,
+1. Exploration notebook.
+2. Tree ensembles and a CNN; evaluate by excess log-loss over the oracle,
    calibration, guess regret, and game score.
-4. Sensitivity check: rerun the main results at densities 0.20 and 0.22.
+3. Sensitivity check: rerun the main results at densities 0.20 and 0.22.
 
 ## Later ideas
 
