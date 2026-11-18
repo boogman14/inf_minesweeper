@@ -2,9 +2,7 @@
 .vscode/
 data/*
 !data/screenshots
-results/*
-!results/figures/
-!results/findings.md
+results/
 __pycache__/
 .ipynb_checkpoints/
 *.egg-info/
