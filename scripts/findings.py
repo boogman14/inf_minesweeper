@@ -50,8 +50,8 @@ def policy_comparison(games: int, workers: int | None) -> dict:
             print(f"  density {p:.2f}, {name} guessing: {time.time() - t:.0f}s",
                   file=sys.stderr, flush=True)
     return out
-
-
+ 
+ 
 def _stuck_stats(seed: int, cfg: Config = Config()) -> list[tuple[bool, float, int, int]]:
     """Play one game like simulate.py; at each stuck position record
     (oracle finds a safe cell, oracle seconds, cells over budget, cells)."""
@@ -89,16 +89,16 @@ def _stuck_stats(seed: int, cfg: Config = Config()) -> list[tuple[bool, float, i
         solver.reveal(*pick)
         guesses += 1
     return rows
-
-
+ 
+ 
 def stuck_stats(games: int, workers: int | None) -> np.ndarray:
     t = time.time()
     with Pool(workers or os.cpu_count() or 1) as pool:
         rows = [r for game in pool.map(_stuck_stats, range(games), chunksize=4) for r in game]
     print(f"  stuck positions: {time.time() - t:.0f}s", file=sys.stderr, flush=True)
     return np.array(rows, dtype=float)
-
-
+ 
+ 
 def calibration(path: str) -> dict:
     from inf_minesweeper.loader import load
     from inf_minesweeper.metrics import ece, reliability
@@ -107,30 +107,30 @@ def calibration(path: str) -> dict:
     pred, obs, _ = reliability(y, q, bins=20)
     return dict(rows=len(q), mean_q=q.mean(), rate=y.mean(),
                 gap=np.abs(pred - obs).max(), ece=ece(y, q, bins=20))
-
-
+ 
+ 
 def mean_se(x: np.ndarray) -> tuple[float, float]:
     return x.mean(), x.std(ddof=1) / math.sqrt(len(x))
-
-
+ 
+ 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])    #type:ignore
+    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     ap.add_argument("--games", type=int, default=1000, help="games per policy and density")
     ap.add_argument("--stuck-games", type=int, default=500)
     ap.add_argument("--data", help="dataset .npz for the calibration finding")
     ap.add_argument("--workers", type=int)
     args = ap.parse_args()
-
+ 
     print("running...", file=sys.stderr)
     pol = policy_comparison(args.games, args.workers)
     st = stuck_stats(args.stuck_games, args.workers)
     cal = calibration(args.data) if args.data else None
-
+ 
     n = args.games
     sectors = int(pol[0.21, "oracle"]["sectors"][0])
     o, r = pol[0.21, "oracle"], pol[0.21, "random"]
     diff_m, diff_se = mean_se(o["score"] - r["score"])
-
+ 
     lines = [
         "## Findings so far",
         "",
@@ -164,7 +164,7 @@ def main() -> None:
             lines.append(f"  | {p:.2f} | {name} | {g['cleared'].mean():.1f} | "
                          f"{g['locked'].mean():.2f} | {g['score'].mean():.0f} |")
     lines.append("")
-
+ 
     if cal:
         lines += [
             f"- The oracle is calibrated against the true mines. Over {cal['rows']:,} "
@@ -190,7 +190,7 @@ def main() -> None:
         f"  budget of {Config().max_nodes:,} nodes and are left out of the data.",
     ]
     print("\n".join(lines))
-
-
+ 
+ 
 if __name__ == "__main__":
     main()

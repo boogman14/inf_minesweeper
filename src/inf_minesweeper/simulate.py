@@ -12,6 +12,10 @@ One game, inside a box of sectors around the first click:
    states, its oracle probability q, and whether it really is a mine.
 4. One candidate is revealed: the oracle's safest cell, or with probability
    `epsilon` a random one. A mine locks the sector and the game goes on.
+   
+Candidates whose oracle search exceeds its budget are logged too, with q =
+NaN: their mine label is still known. `loader.load` leaves them out unless
+asked, so the oracle-based metrics never see a missing q.
 
 The game ends when the box has no candidates left or after `max_guesses`.
 
@@ -23,6 +27,16 @@ Command line (writes one compressed .npz file):
 
     python -m inf_minesweeper.simulate --games 2000 --out data/raw/guesses.npz
     python -m inf_minesweeper.simulate --minutes 5 --out data/raw/guesses.npz
+
+Test sets for distribution shift use other seeds and densities, e.g.
+
+    python -m inf_minesweeper.simulate --games 1000 --first-seed 100000 \
+        --density 0.20 --out data/raw/shift_p020.npz
+
+and games played by a trained model (saved with pickle) use --policy:
+
+    python -m inf_minesweeper.simulate --games 1000 --first-seed 200000 \
+        --epsilon 0 --policy results/lgb5.pkl --out data/raw/played_lgb5.npz
 """
 
 from __future__ import annotations
@@ -31,11 +45,13 @@ import argparse
 import json
 import math
 import os
+import pickle
 import random
 import time
 from dataclasses import asdict, dataclass
 from itertools import count
-from multiprocessing import Pool
+import multiprocessing as mp
+from typing import Callable
 
 import numpy as np
 
@@ -68,8 +84,16 @@ def window(board: Board, x: int, y: int) -> np.ndarray:
     return out
 
 
-def play_game(seed: int, cfg: Config = Config()) -> tuple[dict, dict]:
-    """Play one game. Returns (rows, summary); rows hold one entry per candidate cell at every forced guess"""
+Policy = Callable[[np.ndarray], np.ndarray]   # (n, 9, 9) windows -> P(mine)
+
+
+def play_game(seed: int, cfg: Config = Config(), policy: Policy | None = None) -> tuple[dict, dict]:
+    """Play one game. Returns (rows, summary); rows hold one entry per 
+    candidate cell at every forced guess.
+    
+    `policy` picks the guess in place of the oracle: it gets the candidates'
+    windows and the candidate with the lowest returned value is revealed.
+    Random guesses (`epsilon`) still apply on top."""
     board = Board(seed, density=cfg.density, lock_penalty=cfg.lock_penalty)
     solver = Solver(board, sector_region(board, cfg.radius, cfg.start))
     rng = random.Random(seed)
@@ -77,6 +101,7 @@ def play_game(seed: int, cfg: Config = Config()) -> tuple[dict, dict]:
     
     rows = {k: [] for k in ("window", "q", "mine", "x", "y", "position", "chosen")}
     guesses = random_guesses = certain_moves = dropped = 0
+    pick_q = pick_q_n = regret = 0.0
     
     while guesses < cfg.max_guesses:
         solver.solve()
@@ -101,15 +126,27 @@ def play_game(seed: int, cfg: Config = Config()) -> tuple[dict, dict]:
         dropped += len(cands) - len(known)
         if not cands:
             break
-        if known and rng.random() >= cfg.epsilon:
+        windows = [window(board, *c) for c in cands]
+        if policy is not None:
+            if rng.random() >= cfg.epsilon:
+                p = np.asarray(policy(np.stack(windows)), dtype=float)
+                pick = cands[int(np.argmin(p))]
+            else:
+                pick = rng.choice(cands)
+                random_guesses += 1
+        elif known and rng.random() >= cfg.epsilon:
             best = min(probs[c] for c in known)
             pick = rng.choice([c for c in known if probs[c] <= best + 1e-12])
         else:
             pick = rng.choice(cands)
             random_guesses += 1
+        if known and not math.isnan(probs[pick]):
+            pick_q += probs[pick]
+            pick_q_n += 1
+            regret += probs[pick] - min(probs[c] for c in known)
             
-        for c in known:
-            rows["window"].append(window(board, *c))
+        for c, w in zip(cands, windows):
+            rows["window"].append(w)
             rows["q"].append(probs[c])
             rows["mine"].append(board.is_mine(*c))
             rows["x"].append(c[0])
@@ -134,6 +171,9 @@ def play_game(seed: int, cfg: Config = Config()) -> tuple[dict, dict]:
         mines_hit=len(board.hits),
         certain_moves=certain_moves,
         dropped_cells=dropped,
+        pick_q_sum=pick_q,
+        pick_q_n=pick_q_n,
+        regret_sum=regret,
         sectors=len(inner),
         cleared=len(cleared),
         locked=len(locked),
@@ -145,7 +185,7 @@ def play_game(seed: int, cfg: Config = Config()) -> tuple[dict, dict]:
     return rows, summary
 
 
-def _job(args: tuple[int, Config]) -> tuple[dict, dict]:
+def _job(args: tuple[int, Config, Policy | None]) -> tuple[dict, dict]:
     return play_game(*args)
 
 
@@ -156,9 +196,16 @@ def run(
     cfg: Config = Config(),
     workers: int | None = None,
     progress: bool = True,
+    policy: Policy | None = None
 ) -> dict[str, np.ndarray]:
     """Play `games` games (seeds first_seed, first_seed + 1, ...) or as many as
-    fit in `minutes`, in parallel. Returns the dataset as a dict of arrays."""
+    fit in `minutes`, in parallel. Returns the dataset as a dict of arrays.
+    
+    `policy` (see play_game) is sent to every worker process, so it must be
+    picklable: a bound method like `model.predict` is fine, a lambda is not.
+    Workers are then started fresh ("spawn") rather than forked, because
+    libraries like LightGBM can deadlock in a forked copy of a process that
+    has already used their thread pool. For a GPU model, use workers=1."""
     if (games is None) == (minutes is None):
         raise ValueError("give exactly one of games or minutes")
     seeds = range(first_seed, first_seed + games) if games else count(first_seed)
@@ -168,8 +215,9 @@ def run(
     cols = {k: [] for k in ("window", "q", "mine", "x", "y", "position", "chosen", "game")}
     summaries = []
     t0 = time.time()
-    with Pool(workers) as pool:
-        for rows, summary in pool.imap(_job, ((s, cfg) for s in seeds), chunksize=4):
+    ctx = mp.get_context("spawn" if policy is not None else None)
+    with ctx.Pool(workers) as pool:
+        for rows, summary in pool.imap(_job, ((s, cfg, policy) for s in seeds), chunksize=4):
             n = len(rows["q"])
             for k in rows:
                 cols[k].extend(rows[k])
@@ -199,23 +247,27 @@ def run(
 
 
 def report(data: dict[str, np.ndarray]) -> str:
-    """Short text summary of recorded datset"""
+    """Short text summary of a dataset."""
     n_games = len(data["game_seed"])
-    q, mine = data["q"], data["mine"]
+    scored = ~np.isnan(data["q"])
+    q, mine = data["q"][scored], data["mine"][scored]
     positions = len(np.unique(np.stack([data["game"], data["position"]]), axis=1).T)
     p = float(json.loads(str(data["config"]))["density"])
     cm, cs = data["game_cleared_mines"].sum(), data["game_cleared"].sum()
     lm, ls = data["game_locked_mines"].sum(), data["game_locked"].sum()
     lines = [
-        f"games: {n_games}   forced-guess positions: {positions}   rows: {len(q)}",
-        f"candidates per position: {len(q) / max(positions, 1):.1f}",
+        f"games: {n_games}   forced-guess positions: {positions}   rows: {len(scored)}",
+        f"candidates per position: {len(scored) / max(positions, 1):.1f}",
         f"mean oracle q: {q.mean():.4f}   actual mine rate: {mine.mean():.4f}",
         f"guesses per game: {data['game_guesses'].mean():.1f}   "
         f"mines hit per game: {data['game_mines_hit'].mean():.2f}",
         f"inner sectors per game: cleared {data['game_cleared'].mean():.1f}, "
         f"locked {data['game_locked'].mean():.1f} of {data['game_sectors'][0]}   "
         f"score {data['game_score'].mean():.0f}",
-        f"cells dropped for oracle budget: {data['game_dropped_cells'].sum()}",
+        f"rows without an oracle q (search budget): {(~scored).sum()} "
+        f"({(~scored).mean():.1%}); their mine rate {data['mine'][~scored].mean() if (~scored).any() else float('nan'):.4f}",
+        f"guessed cells: mean oracle q {data['game_pick_q_sum'].sum() / max(data['game_pick_q_n'].sum(), 1):.4f}, "
+        f"mean regret {data['game_regret_sum'].sum() / max(data['game_pick_q_n'].sum(), 1):.4f}",
         f"density: true {p:.4f}   in cleared sectors {cm / (64 * cs):.4f}"
         + (f"   in locked sectors {lm / (64 * ls):.4f}" if ls else ""),
     ]
@@ -232,15 +284,20 @@ def main() -> None:
     ap.add_argument("--density", type=float, default=Config.density)
     ap.add_argument("--radius", type=int, default=Config.radius)
     ap.add_argument("--epsilon", type=float, default=Config.epsilon)
-    args_ = ap.parse_args()
-    if args_.games is None and args_.minutes is None:
-        args_.games = 200
-    cfg = Config(density=args_.density, radius=args_.radius, epsilon=args_.epsilon)
-    data = run(args_.games, args_.minutes, args_.first_seed, cfg, args_.workers)
-    os.makedirs(os.path.dirname(args_.out) or ".", exist_ok=True)
-    np.savez_compressed(args_.out, **data)              #type:ignore
+    ap.add_argument("--policy", help="pickled model with a predict(windows) method")
+    args = ap.parse_args()
+    policy = None
+    if args.policy:
+        with open(args.policy, "rb") as f:
+            policy = pickle.load(f).predict
+    if args.games is None and args.minutes is None:
+        args.games = 200
+    cfg = Config(density=args.density, radius=args.radius, epsilon=args.epsilon)
+    data = run(args.games, args.minutes, args.first_seed, cfg, args.workers, policy=policy)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    np.savez_compressed(args.out, allow_pickle=False, **data)
     print(report(data))
-    print(f"Saved {args_.out} ({os.path.getsize(args_.out) / 1e6:.1f} MB)")
+    print(f"saved {args.out} ({os.path.getsize(args.out) / 1e6:.1f} MB)")
     
     
 if __name__ == "__main__":

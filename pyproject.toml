@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "infinite-minesweeper"
 version = "0.1.0"
 requires-python = ">=3.10"
-license = "Apache-2.0
+license = "Apache-2.0"
 
 [tool.setuptools.packages.find]
 where = ["src"]

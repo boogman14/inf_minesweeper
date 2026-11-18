@@ -22,7 +22,7 @@ SECTOR = 8
 def _peaks(profile: np.ndarray, threshold: float = 0.45) -> list[float]:
     """Centres of runs where `profile` exceeds `threshold` (the pink lines)."""
     runs: list[list[int]] = []
-    for i in np.where(profile > threshold)[0]:
+    for i in np.where(profile > threshold)[0].tolist():
         if runs and i - runs[-1][-1] <= 2:
             runs[-1].append(i)
         else:

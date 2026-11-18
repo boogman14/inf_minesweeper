@@ -7,7 +7,7 @@ import json
 import numpy as np
 
 
-def load(path: str) -> dict:
+def load(path: str, unscored: bool = False) -> dict:
     """Read a file written by simulate.py.
 
     Per-row arrays (one row per candidate cell at a forced guess):
@@ -24,6 +24,13 @@ def load(path: str) -> dict:
     with np.load(path) as f:
         data = {k: f[k] for k in f.files}
     data["config"] = json.loads(str(data["config"]))
+    if not unscored:
+        keep = ~np.isnan(data["q"])
+        if not keep.all():
+            n = len(keep)
+            for k, v in data.items():
+                if isinstance(v, np.ndarray) and not k.startswith("game_") and len(v) == n:
+                    data[k] = v[keep]
     return data
 
 
