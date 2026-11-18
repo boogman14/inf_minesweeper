@@ -101,7 +101,7 @@ def play_game(seed: int, cfg: Config = Config()) -> tuple[dict, dict]:
         dropped += len(cands) - len(known)
         if not cands:
             break
-        if known and rng.random() <= cfg.epsilon:
+        if known and rng.random() >= cfg.epsilon:
             best = min(probs[c] for c in known)
             pick = rng.choice([c for c in known if probs[c] <= best + 1e-12])
         else:

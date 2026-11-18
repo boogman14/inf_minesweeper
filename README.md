@@ -39,11 +39,13 @@ that a bad guess costs more than the points it forfeits.
 | `board.py` | Infinite board, endless and hardcore rules, sectors, scoring, terminal game | Done |
 | `solver.py` | Deterministic solver that plays every simple certain move; full-game autoplay | Done |
 | `oracle.py` | Exact mine probability for every frontier cell | Done |
-| `scripts/screenshot_density.py` | Mine density from app screenshots | Done |
+| `screenshots.py` | Reads cleared sectors from app screenshots; `scripts/screenshot_density.py` prints the density estimate | Done |
 | `simulate.py` | Plays games and logs forced-guess positions as data | Done |
 | `loader.py` | Loads the dataset, splits by game, crops windows | Done |
 | `features.py` | Handcrafted features, one-hot windows, CNN channels, rotations and reflections | Done |
 | `models.py` | Baselines done (constant, local ratio, logistic); tree ensembles and CNN planned | In progress |
+| `plotting.py` | Shared figure style and colors for notebooks and the report | Done |
+| `notebooks/01_exploration.ipynb` | Dataset exploration; saves figures to `results/figures/` | Done |
 | `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration, guess quality | Done |
 
 ## Setup
@@ -57,6 +59,22 @@ pip install --upgrade pip
 pip install -e .
 pip install -r requirements.txt
 ```
+
+`requirements.txt` pins the newest versions that still support Python 3.10.
+PyTorch is used for the CNN. To train on an NVIDIA GPU, install the CUDA build
+and check that it sees the GPU:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+On a machine without a GPU, the much smaller CPU-only build works too:
+
+```bash
+pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+```
+
+XGBoost can also train on the GPU (`device="cuda"`); LightGBM runs on the CPU.
 
 If ROS 2 is sourced in the shell, its pytest plugins break the venv's pytest.
 Disable plugin auto-loading for this project:
@@ -96,7 +114,7 @@ best = min(probs, key=probs.get) # safest guess
 print(best, probs[best])
 
 # Highlight cells without changing the game: one cell, or every candidate
-# with its mine probability in tenths (0.14 shows as 1).
+# with its mine probability in tenths (0.14 shows as 1, 0.68 as 6).
 print(render_labeled(board, 4, 4, view=14, marks=[best]))
 print(render_labeled(board, 4, 4, view=14, marks=tenths(probs)))
 
@@ -170,10 +188,25 @@ solved exactly by enumerating the layouts consistent with the numbers,
 weighted by density. Cells that touch the same numbers are merged into groups,
 which keeps the search fast. Pieces that exceed a search budget return NaN.
 
+## Terminology
+
+A **forced guess** here is a position where no candidate cell is provably
+safe, so some cell must be guessed to continue. The Minesweeper Wiki uses the
+term more narrowly, for a region cut off from all further information, which
+must be guessed no matter what else is solved. Many cells in this project's
+forced-guess positions could still be resolved later by information from
+elsewhere; the position as a whole cannot move without a guess.
+
+Probabilities quoted on the wiki, such as two-thirds survival in a finned
+box, assume a board with a fixed total number of mines. On an infinite board
+with independent mines there is no total, so layouts with more mines are less
+likely by a factor of p/(1 - p) each, and the same pattern can have different
+odds.
+
 ## Mine density in the app
 
 Estimated from four screenshots of cleared sectors, where every hidden cell is
-a flagged mine (`scripts/screenshot_density.py` locates the sector lines and
+a flagged mine (`inf_minesweeper.screenshots` locates the sector lines and
 classifies each cell). Sectors containing anything else, such as unfinished
 cells or icons, were dropped.
 
@@ -200,25 +233,36 @@ window of visible states, its oracle probability, and whether it is a mine.
 The guess itself is the oracle's safest cell, or a random candidate 20% of
 the time.
 
-A 350-game sample (about one minute on two cores):
+The current dataset comes from 5,000 games, seeds 0 to 4,999
+(`python -m inf_minesweeper.simulate --games 5000`, about 7.5 minutes):
 
-- 4,287 forced-guess positions and 142,889 rows, about 33 candidates per
-  position and 12 guesses per game.
-- Mean oracle probability 0.4233, actual mine rate 0.4233.
-- Log-loss on these rows: 0.582 for the oracle, 0.681 for a constant equal to
-  the mine rate, 0.797 for a constant equal to the density. Learned models
-  should land between the first two.
-- Per game, 23.9 of 25 inner sectors cleared, 0.4 locked, mean score 315.
-- About 3% of games end early: the first guess locks the starting sector
+- 62,701 forced-guess positions and 2,063,361 rows: about 33 candidates per
+  position and 12.6 guesses per game. The file is 11.0 MB.
+- Mean oracle probability 0.4220, actual mine rate 0.4228.
+- Log-loss on these rows: 0.587 for the oracle, 0.681 for a constant equal to
+  the mine rate, 0.796 for a constant equal to the density. Learned models
+  should land between the first two; the gap of about 0.094 is what they can
+  win.
+- Per game, 24.2 of 25 inner sectors cleared, 0.3 locked, mean score 320.
+  Mines hit average 3.1 per game, most of them in the outer ring of the play
+  box, which is not scored.
+- 72,031 candidate cells (3.4%) were dropped because their component exceeded
+  the oracle's search budget of 200,000 nodes.
+- Cleared sectors have density 0.2082 and locked sectors 0.2569, against a
+  true 0.21: the selection bias described above, measured on this data.
+- A few percent of games end early: the first guess locks the starting sector
   before the opening reaches its edge, leaving nothing playable. These games
   are kept as they are, since locked sectors never reopen here.
+- Splitting by game with a 20% test share gives 4,000 training games and
+  1,000 test games.
 
 ## Baseline results
 
-Trained on 280 games and tested on 70 held-out games (31,303 rows) from the
-350-game sample. "Excess" is the expected log-loss above the oracle's, so 0
-is perfect. "Gap closed" is measured from the mine-rate constant to the
-oracle. "Hit rate" is the chance of a mine when the model picks the guess.
+Preliminary: trained on 280 games and tested on 70 held-out games (31,303
+rows) from an earlier 350-game sample. To be rerun on the current dataset.
+"Excess" is the expected log-loss above the oracle's, so 0 is perfect. "Gap 
+closed" is measured from the mine-rate constant to the oracle. "Hit rate" is 
+the chance of a mine when the model picks the guess.
 
 | Model | Log-loss | Excess | Gap closed | Hit rate |
 | --- | --- | --- | --- | --- |
@@ -234,27 +278,41 @@ cells, so their hit rate is that of a random pick.
 
 ## Findings so far
 
-The policy comparison uses the measured density, 0.21. The other numbers were
-run at 0.20 and have not been rerun.
+Generated by `scripts/findings.py` (1,000 games per policy and density, seeds 0 to 999).
 
 - An unbounded solver does not stop: runs were still going past 100,000
-  revealed cells. Games are therefore played in a 5×5 block of sectors (40×40
-  cells).
-- Guess quality shows up in the score. Over 100 endless games per policy in a
-  25-sector box, random guessing clears a mean of 19.2 sectors, locks 3.9, and
-  scores 227; always taking the oracle's safest cell clears 22.0, locks 2.0,
-  and scores 277. The gap between those two is what the learned models
-  compete for.
-- Density matters. With random guessing, the mean number of locked sectors is
-  0.6 at density 0.15, 3.0 at 0.20, and 8.1 at 0.25.
-- The oracle is calibrated against the true mines. Over 1,500 stuck positions
-  (about 49,500 cells), the mean predicted probability is 0.397 and the
-  actual mine rate is 0.398.
-- The solver's two rules are incomplete. In 56% of stuck positions the oracle
-  finds a cell that is certainly safe. A forced guess is therefore defined by
-  the oracle (no certain-safe cell left), not by the solver stalling.
-- The oracle takes a median of 3 ms per position; 0.4% of cells hit the
-  search budget.
+  revealed cells. Games are therefore played in a 7×7 block of sectors and
+  scored on the inner 5×5.
+- Guess quality shows up in the score. Over 1,000 endless games at density
+  0.21, with every certain move played and only the forced guesses
+  differing, random guessing clears a mean of 23.0 of 25 sectors,
+  locks 0.62, and scores 302; always taking the oracle's safest
+  cell clears 24.2, locks 0.31, and scores 321. The paired
+  difference is 18.8 ± 4.7 points per game (95%). The gap between the
+  two policies is what the learned models compete for.
+- The oracle's lead holds across the uncertainty in the measured density.
+  Scores rise with density because a cleared sector earns one point per
+  mine.
+
+  | Density | Policy | Cleared | Locked | Score |
+  | --- | --- | --- | --- | --- |
+  | 0.20 | random | 23.3 | 0.35 | 294 |
+  | 0.20 | oracle | 24.5 | 0.19 | 310 |
+  | 0.21 | random | 23.0 | 0.62 | 302 |
+  | 0.21 | oracle | 24.2 | 0.31 | 321 |
+  | 0.22 | random | 22.2 | 1.06 | 302 |
+  | 0.22 | oracle | 24.1 | 0.43 | 333 |
+
+- The oracle is calibrated against the true mines. Over 2,063,361 candidate
+  cells, the mean predicted probability is 0.422 and the actual mine rate
+  is 0.423; across 20 probability bins the largest gap is 0.011.
+- The solver's two rules are incomplete. In 15% of the 7,323 positions
+  where the solver is stuck, the oracle still finds a cell that is
+  certainly safe. A forced guess is therefore defined by the oracle (no
+  certain-safe cell left), not by the solver stalling.
+- The oracle takes a median of 15 ms per stuck position (95th
+  percentile 219 ms); 2.7% of candidate cells exceed its search
+  budget of 200,000 nodes and are left out of the data.
 
 ## Layout
 
@@ -270,10 +328,9 @@ results/               figures and tables (not tracked)
 
 ## Next steps
 
-1. Exploration notebook.
-2. Tree ensembles and a CNN; evaluate by excess log-loss over the oracle,
+1. Tree ensembles and a CNN; evaluate by excess log-loss over the oracle,
    calibration, guess regret, and game score.
-3. Sensitivity check: rerun the main results at densities 0.20 and 0.22.
+2. Sensitivity check: rerun the main results at densities 0.20 and 0.22.
 
 ## Later ideas
 
@@ -284,6 +341,21 @@ Outside the scope of this project:
   score worse than a fast approximate one.
 - First-click initialization: how the first-click rule biases mine density
   near the start, and whether models lose calibration there.
+- Endless gameplay: circle back to locked sectors by clearing neighboring
+  sectors. Requires major changes to the scoring system.
+- Playable front end with a model-assist overlay: a GUI over `board.py` that
+  shows the model's mine probabilities on the frontier, or lets the model
+  play while you watch. infinisweeper (reference 6) is a working example of
+  an infinite-scrolling board in Pygame Zero.
+- Game themes: customize the colorway for the numbers, markers, etc. Let the
+  models have a little fun of their own.
+
+## License
+
+The code is released under the Apache License 2.0; see `LICENSE`. The app
+screenshots in `data/screenshots/` are from Infinite Minesweeper and are
+included only as data for the density estimate; they are not covered by this
+license.
 
 ## References
 
@@ -295,5 +367,22 @@ Outside the scope of this project:
    https://www.youtube.com/shorts/RcypVbPEprE
    How Minesweeper adjusts the board on the first click; background for the
    `first_click` option.
+3. Minesweeper Wiki, "Forced Guess":
+   https://minesweeper.wiki.gg/wiki/Forced_Guess
+   Definitions and examples of forced guesses (50/50, pseudo 50/50, finned
+   box). Note that this project uses "forced guess" more broadly; see
+   "Terminology" above.
+4. Minesweeper Wiki, Guessing category:
+   https://minesweeper.wiki.gg/wiki/Category:Guessing
+   Pages on guessing, 50/50s, and pseudo 50/50s.
+5. Minesweeper Wiki, Patterns category:
+   https://minesweeper.wiki.gg/wiki/Category:Patterns
+   Easy, medium, and evil deduction patterns; background for what the
+   solver's two rules can and cannot catch.
+6. lordmauve, infinisweeper (GPL-3.0):
+   https://github.com/lordmauve/infinisweeper
+   An infinite-scrolling Minesweeper in Python and Pygame Zero; reference for
+   a playable front end. Its code is GPL-3.0, so a front end that copies it
+   must also be released under GPL-3.0.
 
 <!-- Add further references below: papers, videos, solver write-ups. -->
