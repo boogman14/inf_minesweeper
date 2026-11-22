@@ -46,6 +46,7 @@ that a bad guess costs more than the points it forfeits.
 | `models.py` | Baselines (constant, local ratio, logistic), LightGBM, and a CNN | Done |
 | `plotting.py` | Shared figure style and colors for notebooks and the report | Done |
 | `notebooks/01_exploration.ipynb` | Dataset exploration; saves figures to `results/figures/` | Done |
+| `notebooks/02_modeling.ipynb` | Prediction baselines, trees, and neural net | In progress |
 | `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration, guess quality | Done |
 
 ## Setup
@@ -261,7 +262,9 @@ The oracle gives the exact probability for any position, including shifted
 ones, so a model's calibration and guess quality can be measured under every
 one of these shifts, not just its accuracy against labels.
 
-Policy shift, 1,000 games on unseen seeds (200,000 to 200,999) at density
+### Policy shift
+
+1,000 games on unseen seeds (200,000 to 200,999) at density
 0.21, with the guesser making every forced guess (`--epsilon 0`):
 
 | Guesser | Cleared | Locked | Mines hit | Score | Mine chance of its guesses | Regret |
@@ -288,11 +291,48 @@ passed over again at the next forced guess. The safest cell is the same cell
 as at the previous forced guess in 13% of positions when the oracle plays
 (ties), 56% when the model plays, and 62% when guessing at random. So per-guess
 regret in self-play counts one missed cell several times, and the game score
-is the cleaner summary. The planned fix is to add the positions from the
-model's own games to its training data and retrain (the DAgger approach from
-imitation learning).
+is the cleaner summary.
 
-Density shift, with the models above scored unchanged on 1,000 games
+### Retraining on the model's own games (DAgger)
+
+The standard fix for this kind of shift, from imitation learning, is to add
+the positions a model reaches in its own games to its training data and
+retrain. To separate the effect of the right data from the effect of more
+data, each model is also retrained with a control: the same amount of extra
+data from games the oracle played on the same seeds.
+
+| Retrained model | Extra training data |
+| --- | --- |
+| LightGBM 5×5, DAgger | `played_lgb5.npz`: 1,000 games LightGBM 5×5 played itself |
+| LightGBM 5×5, control | `played_oracle.npz`: 1,000 games the oracle played |
+| CNN 9×9, DAgger | `played_cnn9_sym.npz`: 1,000 games the symmetrized CNN played |
+| CNN 9×9, control | `played_oracle.npz` |
+
+The extra games are split 7/8 for fitting and 1/8 for early stopping, like
+the original data. On the fixed test set, retraining does not hurt either
+model:
+
+| Model | Excess | Gap closed | ECE | Hit rate |
+| --- | --- | --- | --- | --- |
+| LightGBM 5×5 | 0.050 | 48% | 0.006 | 0.284 |
+| LightGBM 5×5, DAgger | 0.049 | 49% | 0.003 | 0.284 |
+| LightGBM 5×5, control | 0.049 | 49% | 0.007 | 0.283 |
+| CNN 9×9, symmetrized | 0.029 | 70% | 0.020 | 0.250 |
+| CNN 9×9, DAgger | 0.025 | 74% | 0.010 | 0.247 |
+| CNN 9×9, control | 0.026 | 73% | 0.012 | 0.249 |
+
+LightGBM barely moves with either kind of extra data, so it is limited by
+what trees on one-hot cells can represent. The CNN improves with both, so it
+was still limited by data. DAgger is slightly ahead of the control for the
+CNN, but retraining the CNN alone shifts its scores by a few tenths of a
+point (GPU randomness), so this difference is not conclusive. The real test
+is self-play: all six models, the oracle and random guessing on 1,000 new
+games (seeds 300,000 to 300,999), where DAgger should lower regret in the
+model's own games more than the control does. (Results pending.)
+
+### Density shift
+
+The models from "Model results" below, scored unchanged on 1,000 games
 simulated at densities 0.20 and 0.22 on unseen seeds (CNN rows symmetrized):
 
 | Window | Density | Excess | Gap closed | ECE | Hit rate | Oracle hit rate |
@@ -477,13 +517,18 @@ notebooks/             exploration and modeling notebooks
 scripts/               one-off analysis scripts
 data/screenshots/      app screenshots used for the density estimate
 data/                  simulated datasets (not tracked)
-results/               figures and tables (not tracked)
+results/               results tables as CSV (tracked); figures and saved
+                       models (not tracked)
 ```
 
 ## Next steps
 
-1. Policy shift: self-play runs for the CNN; retrain with the positions from
-   a model's own games and play 1,000 new games.
+1. DAgger self-play: play 1,000 games on seeds 300,000 to 300,999 with
+   `lgb5`, `lgb5_dagger`, `lgb5_control`, `cnn9_sym`, `cnn9_dagger`,
+   `cnn9_control`, the oracle and random guessing, and compare scores and
+   regret.
+2. Report figures, including the pinned board plot (model and oracle
+   probabilities side by side on one position).
 
 ## Later ideas
 

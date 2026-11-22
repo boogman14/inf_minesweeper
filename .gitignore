@@ -3,7 +3,7 @@
 data/*
 !data/screenshots
 results/*
-!results/figures/
+!results/*.csv
 __pycache__/
 .ipynb_checkpoints/
 *.egg-info/
