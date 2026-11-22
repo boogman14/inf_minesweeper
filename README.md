@@ -43,7 +43,7 @@ that a bad guess costs more than the points it forfeits.
 | `simulate.py` | Plays games and logs forced-guess positions as data | Done |
 | `loader.py` | Loads the dataset, splits by game, crops windows | Done |
 | `features.py` | Handcrafted features, one-hot windows, CNN channels, rotations and reflections | Done |
-| `models.py` | Baselines done (constant, local ratio, logistic); tree ensembles and CNN planned | In progress |
+| `models.py` | Baselines (constant, local ratio, logistic) and LightGBM done; CNN planned | In progress |
 | `plotting.py` | Shared figure style and colors for notebooks and the report | Done |
 | `notebooks/01_exploration.ipynb` | Dataset exploration; saves figures to `results/figures/` | Done |
 | `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration, guess quality | Done |
@@ -129,12 +129,35 @@ python -m inf_minesweeper.simulate --minutes 5 --out data/raw/guesses.npz
 python -m inf_minesweeper.simulate --games 2000 --out data/raw/guesses.npz
 ```
 
+Test sets for distribution shift use seeds that never appear in training
+(the training data uses seeds 0 to 4,999) and, optionally, another density:
+
+```bash
+python -m inf_minesweeper.simulate --games 1000 --first-seed 100000 --density 0.20 --out data/raw/shift_p020.npz
+python -m inf_minesweeper.simulate --games 1000 --first-seed 100000 --density 0.22 --out data/raw/shift_p022.npz
+```
+
+To play whole games with a trained model making the guesses, save the model
+with pickle and pass it as the policy (`--epsilon 0` turns off random
+guesses). The result is a normal dataset of the positions the model itself
+reached, with its game scores:
+
+```bash
+python -m inf_minesweeper.simulate --games 1000 --first-seed 200000 --epsilon 0 \
+    --policy results/lgb5.pkl --out data/raw/played_lgb5.npz
+```
+
+From Python, `run(..., policy=model.predict)` does the same. Call it from a
+notebook or from a script with an `if __name__ == "__main__":` guard, since
+the worker processes are started fresh and re-import the calling script.
+
 Load it:
 
 ```python
 from inf_minesweeper.loader import load, split_by_game, crop
 
 d = load("data/raw/guesses.npz")             # "../data/raw/..." from notebooks/
+                                             # unscored=True keeps rows without a q
 train, test = split_by_game(d["game"])       # whole games on each side
 X = crop(d["window"], 5)                     # 5x5 windows from the stored 9x9
 y, q = d["mine"], d["q"]                     # label and oracle probability
@@ -203,6 +226,76 @@ with independent mines there is no total, so layouts with more mines are less
 likely by a factor of p/(1 - p) each, and the same pattern can have different
 odds.
 
+## Missing data
+
+Two kinds of values are missing, and in both cases whether a value is missing
+depends on the value itself (missing not at random):
+
+- **Hidden cells (features).** Every hidden cell has a true state the player
+  cannot see. Mines are never revealed, revealed cells are safe by
+  definition, and zeros open the area around them, so what is hidden carries
+  information. Hidden cells are therefore not imputed: "hidden" is its own
+  category in every encoding, and the models learn from the pattern of gaps.
+- **Oracle probabilities (target).** When a position is too large for the
+  oracle's search budget, its candidates get no exact probability. These rows
+  are kept with `q = NaN` and their true mine label. `loader.load` leaves them
+  out by default, because every oracle-based metric needs `q`; pass
+  `unscored=True` to train on them too. They come from the largest, most
+  tangled positions, so leaving them out under-represents the hardest
+  guesses.
+
+## Distribution shift
+
+Training and test data come from the same simulator and settings, split by
+whole games, so the fixed test set has no shift. Shift appears when a model
+is used beyond that setting:
+
+| Shift | Why it happens | How it is measured or handled |
+| --- | --- | --- |
+| Guessing policy | Training positions come from games guided mostly by the oracle; a model playing on its own reaches positions shaped by its own mistakes. | Play whole games with the model making the guesses (`--policy`) and score those games and the positions they reach. If needed, add those positions to training. |
+| Mine density | The app's density is 0.21 with an uncertainty of about ±0.01. | Test sets simulated at 0.20 and 0.22 on unseen seeds. |
+| Simulator vs. app | The simulator simplifies the app (no reopening of locked sectors; its own start). | Density and independent mine placement are checked against app screenshots. |
+| Game stage | Early positions differ from late ones. | Results broken down by guess number within a game. |
+
+The oracle gives the exact probability for any position, including shifted
+ones, so a model's calibration and guess quality can be measured under every
+one of these shifts, not just its accuracy against labels.
+
+First check, 150 games on unseen seeds at density 0.21, with each policy
+making every guess (models trained on the earlier 350-game sample):
+
+| Guesser | Cleared | Locked | Score | Mine chance of its guesses | Regret |
+| --- | --- | --- | --- | --- | --- |
+| Random | 23.1 | 0.66 | 304 | 0.434 | 0.286 |
+| Logistic, 8 features | 23.8 | 0.43 | 314 | 0.280 | 0.131 |
+| LightGBM, 5×5 window | 23.9 | 0.51 | 315 | 0.276 | 0.131 |
+| Oracle | 24.6 | 0.22 | 327 | 0.226 | 0 |
+
+"Mine chance" is the oracle probability of the cells each policy guessed,
+and regret is how much higher that is than the safest cell available. The
+models' guesses in their own games are about as good as on the fixed test
+set (0.30), so this first check shows no harm from the policy shift.
+
+Density shift, with the LightGBM models above scored on 1,000 games simulated
+at densities 0.20 and 0.22 on unseen seeds:
+
+| Window | Density | Excess | Gap closed | ECE | Hit rate | Oracle hit rate |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3×3 | 0.20 | 0.058 | 41% | 0.005 | 0.298 | 0.227 |
+| 3×3 | 0.21 (test set) | 0.054 | 43% | 0.005 | 0.289 | 0.217 |
+| 3×3 | 0.22 | 0.052 | 44% | 0.004 | 0.271 | 0.202 |
+| 5×5 | 0.20 | 0.054 | 46% | 0.006 | 0.294 | 0.227 |
+| 5×5 | 0.21 (test set) | 0.050 | 48% | 0.006 | 0.284 | 0.217 |
+| 5×5 | 0.22 | 0.047 | 49% | 0.004 | 0.268 | 0.202 |
+| 7×7 | 0.20 | 0.054 | 45% | 0.005 | 0.292 | 0.227 |
+| 7×7 | 0.21 (test set) | 0.051 | 47% | 0.008 | 0.283 | 0.217 |
+| 7×7 | 0.22 | 0.048 | 48% | 0.006 | 0.268 | 0.202 |
+
+The models hold up across the density uncertainty: excess changes by at most
+0.004 and calibration stays under 0.01, even though positions at 0.22 have
+nearly twice as many candidates as at 0.20. No retraining on mixed densities
+is needed.
+
 ## Mine density in the app
 
 Estimated from four screenshots of cleared sectors, where every hidden cell is
@@ -256,25 +349,32 @@ The current dataset comes from 5,000 games, seeds 0 to 4,999
 - Splitting by game with a 20% test share gives 4,000 training games and
   1,000 test games.
 
-## Baseline results
+## Model results
 
-Preliminary: trained on 280 games and tested on 70 held-out games (31,303
-rows) from an earlier 350-game sample. To be rerun on the current dataset.
-"Excess" is the expected log-loss above the oracle's, so 0 is perfect. "Gap 
-closed" is measured from the mine-rate constant to the oracle. "Hit rate" is 
-the chance of a mine when the model picks the guess.
+Trained on 3,500 games of the 5,000-game dataset, with 500 games for early
+stopping, and tested on the 1,000 held-out games. "Excess" is the expected
+log-loss above the oracle's, so 0 is perfect. "Gap closed" is measured from
+the mine-rate constant to the oracle. "ECE" is calibration error. "Hit rate"
+is the oracle probability of the cell each model would guess, so it is the
+chance of hitting a mine; the oracle's own is 0.217 and a random pick's
+0.447. "Regret" is how much higher that is than the oracle's pick.
 
-| Model | Log-loss | Excess | Gap closed | Hit rate |
-| --- | --- | --- | --- | --- |
-| Constant, board density 0.21 | 0.802 | 0.217 | | 0.44 |
-| Constant, training mine rate | 0.683 | 0.099 | 0% | 0.44 |
-| Local ratio (no fitting) | 0.654 | 0.069 | 30% | 0.31 |
-| Logistic regression, 8 features | 0.646 | 0.061 | 38% | 0.30 |
-| Oracle | 0.589 | 0 | 100% | 0.20 |
+| Model | Log-loss | Excess | Gap closed | ECE | Hit rate | Regret |
+| --- | --- | --- | --- | --- | --- | --- |
+| Constant, board density 0.21 | 0.793 | 0.209 | | 0.211 | 0.447 | 0.230 |
+| Constant, training mine rate | 0.681 | 0.096 | 0% | 0.003 | 0.447 | 0.230 |
+| Local ratio (no fitting) | 0.654 | 0.069 | 28% | 0.013 | 0.319 | 0.102 |
+| Logistic regression, 8 features | 0.644 | 0.061 | 36% | 0.010 | 0.305 | 0.088 |
+| LightGBM, 3×3 window | 0.638 | 0.054 | 43% | 0.005 | 0.289 | 0.071 |
+| LightGBM, 5×5 window | 0.634 | 0.050 | 48% | 0.006 | 0.284 | 0.067 |
+| LightGBM, 7×7 window | 0.635 | 0.051 | 47% | 0.008 | 0.283 | 0.066 |
 
-The local ratio reads each touching number on its own, as mines still needed
-over unknown cells around it, and averages them. Constant models cannot rank
-cells, so their hit rate is that of a random pick.
+- LightGBM closes about half the gap to the oracle and is well calibrated
+  (ECE under 0.01). Early stopping kept 149, 368 and 264 trees for the 3×3,
+  5×5 and 7×7 windows; each trained in under a minute.
+- Going from 3×3 to 5×5 helps; 7×7 adds nothing for the trees. Either the
+  information beyond two cells away is small, or trees on one-hot cells cannot
+  use it. The CNN tests which.
 
 ## Findings so far
 
@@ -328,9 +428,9 @@ results/               figures and tables (not tracked)
 
 ## Next steps
 
-1. Tree ensembles and a CNN; evaluate by excess log-loss over the oracle,
-   calibration, guess regret, and game score.
-2. Sensitivity check: rerun the main results at densities 0.20 and 0.22.
+1. CNN on the 9×9 window: does it use information the trees cannot?
+2. Policy shift: play 1,000 games with each final model making the guesses
+   (`--policy`) and compare with the fixed test set.
 
 ## Later ideas
 

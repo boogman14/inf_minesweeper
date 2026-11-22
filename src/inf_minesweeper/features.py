@@ -52,7 +52,7 @@ def local_ratios(windows: np.ndarray) -> np.ndarray:
     return np.stack([ratio[:, 2 + dy, 2 + dx] for dy, dx in _OFFSETS], axis=1)
 
 
-def handcrafted(windows: np.ndarray) -> np.ndarray:
+def features_(windows: np.ndarray) -> np.ndarray:
     """(N, 8) float array of simple features; columns are FEATURE_NAMES"""
     w3 = crop(windows, 3).reshape(len(windows), 9)
     w3 = np.delete(w3, 4, axis=1)

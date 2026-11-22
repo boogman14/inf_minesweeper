@@ -12,7 +12,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from inf_minesweeper.features import handcrafted, local_ratios
+from inf_minesweeper.features import features_, local_ratios
 
 
 class Constant:
@@ -48,11 +48,11 @@ class LogisticFeatures:
         self.model = make_pipeline(StandardScaler(), LogisticRegression(C=C, max_iter=1000))
 
     def fit(self, windows, y):
-        self.model.fit(handcrafted(windows), y)
+        self.model.fit(features_(windows), y)
         return self
 
     def predict(self, windows) -> np.ndarray:
-        return self.model.predict_proba(handcrafted(windows))[:, 1]
+        return self.model.predict_proba(features_(windows))[:, 1]
 
     def coefficients(self) -> dict[str, float]:
         from inf_minesweeper.features import FEATURE_NAMES
@@ -62,7 +62,18 @@ class LogisticFeatures:
 def tree_features(windows: np.ndarray, k: int = 5) -> np.ndarray:
     """One-hot k x k window plus the 8 handcrafted features, as float32."""
     from inf_minesweeper.features import one_hot
-    return np.hstack([one_hot(windows, k), handcrafted(windows)]).astype(np.float32)
+    oh = one_hot(windows, k)
+    X = np.empty((len(windows), oh.shape[1] + 8), dtype=np.float32)
+    X[:, :oh.shape[1]] = oh
+    del oh
+    X[:, oh_cols(k):] = features_(windows)
+    return X
+    
+    
+def oh_cols(k: int) -> int:
+    """Number of one-hot columns for a k x k window (centre excluded)."""
+    from inf_minesweeper.board import N_STATES
+    return (k * k - 1) * N_STATES
 
 
 class GradientBoosted:
@@ -88,7 +99,8 @@ class GradientBoosted:
         model = lgb.LGBMClassifier(**self.params)
         kw: dict[str, Any] = {}
         if val is not None:
-            kw["eval_set"] = [(tree_features(val[0], self.k), val[1])]
+            kw["eval_X"] = tree_features(val[0], self.k)
+            kw["eval_y"] = val[1]
             kw["callbacks"] = [lgb.early_stopping(self.patience, verbose=False)]
         model.fit(tree_features(windows, self.k), y, **kw)
         self.model = model
