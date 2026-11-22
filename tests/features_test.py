@@ -1,7 +1,7 @@
 import numpy as np
 
 from inf_minesweeper.board import FLAGGED, HIDDEN
-from inf_minesweeper.features import FEATURE_NAMES, channels, handcrafted, local_ratios, one_hot, symmetries
+from inf_minesweeper.features import FEATURE_NAMES, channels, features_, local_ratios, one_hot, symmetries
 from inf_minesweeper.metrics import ece, excess_log_loss, gap_closed, guess_quality, log_loss
 from inf_minesweeper.models import Constant, LocalRatio, LogisticFeatures
 
@@ -20,7 +20,7 @@ def test_local_ratio_by_hand():
     # Flag one of its other neighbors: the 1 is used up, ratio drops to 0.
     w[0, 2, 4] = FLAGGED
     assert np.nansum(local_ratios(w)[0]) == 0.0
-    f = dict(zip(FEATURE_NAMES, handcrafted(w)[0]))
+    f = dict(zip(FEATURE_NAMES, features_(w)[0]))
     assert f["n_numbers"] == 1 and f["n_unknown"] == 7 and f["sum_numbers"] == 1
 
 
@@ -42,9 +42,9 @@ def test_symmetries_keep_the_features():
     s = symmetries(w)
     assert s.shape == (8, 30, 9, 9)
     assert len({a.tobytes() for a in s}) == 8
-    base = handcrafted(w)
+    base = features_(w)
     for a in s:
-        assert np.allclose(handcrafted(np.ascontiguousarray(a)), base)
+        assert np.allclose(features_(np.ascontiguousarray(a)), base)
 
 
 def test_metrics_by_hand():

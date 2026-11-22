@@ -46,6 +46,7 @@ that a bad guess costs more than the points it forfeits.
 | `models.py` | Baselines (constant, local ratio, logistic) and LightGBM done; CNN planned | In progress |
 | `plotting.py` | Shared figure style and colors for notebooks and the report | Done |
 | `notebooks/01_exploration.ipynb` | Dataset exploration; saves figures to `results/figures/` | Done |
+| `notebooks/02_modeling.ipynb` | Baselines, LightGBM, CNN; saves files to `results/` | Done |
 | `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration, guess quality | Done |
 
 ## Setup
