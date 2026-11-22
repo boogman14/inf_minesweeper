@@ -224,7 +224,7 @@ elsewhere; the position as a whole cannot move without a guess.
 Probabilities quoted on the wiki, such as two-thirds survival in a finned
 box, assume a board with a fixed total number of mines. On an infinite board
 with independent mines there is no total, so layouts with more mines are less
-likely by a factor of p/(1 - p) each, and the same pattern can have different
+likely by a factor of $\frac{p}{(1 - p)}$ each, and the same pattern can have different
 odds.
 
 ## Missing data
@@ -534,18 +534,18 @@ results/               results tables as CSV (tracked); figures and saved
 
 Outside the scope of this project:
 
-- Timed mode: clear as many sectors as possible before the clock runs out.
+- **Timed mode:** clear as many sectors as possible before the clock runs out.
   This turns guessing into a speed trade-off, since a slow exact answer can
   score worse than a fast approximate one.
-- First-click initialization: how the first-click rule biases mine density
+- **First-click initialization:** how the first-click rule biases mine density
   near the start, and whether models lose calibration there.
-- Endless gameplay: circle back to locked sectors by clearing neighboring
+- **True endless gameplay:** circle back to locked sectors by clearing neighboring
   sectors. Requires major changes to the scoring system.
-- Playable front end with a model-assist overlay: a GUI over `board.py` that
+- **Playable front end with a model-assist overlay:** a GUI over `board.py` that
   shows the model's mine probabilities on the frontier, or lets the model
   play while you watch. infinisweeper (reference 6) is a working example of
   an infinite-scrolling board in Pygame Zero.
-- Game themes: customize the colorway for the numbers, markers, etc. Let the
+- **Game themes:** customize the colorway for the numbers, markers, etc. Let the
   models have a little fun of their own.
 
 ## License
