@@ -43,10 +43,9 @@ that a bad guess costs more than the points it forfeits.
 | `simulate.py` | Plays games and logs forced-guess positions as data | Done |
 | `loader.py` | Loads the dataset, splits by game, crops windows | Done |
 | `features.py` | Handcrafted features, one-hot windows, CNN channels, rotations and reflections | Done |
-| `models.py` | Baselines (constant, local ratio, logistic) and LightGBM done; CNN planned | In progress |
+| `models.py` | Baselines (constant, local ratio, logistic), LightGBM, and a CNN | Done |
 | `plotting.py` | Shared figure style and colors for notebooks and the report | Done |
 | `notebooks/01_exploration.ipynb` | Dataset exploration; saves figures to `results/figures/` | Done |
-| `notebooks/02_modeling.ipynb` | Baselines, LightGBM, CNN; saves files to `results/` | Done |
 | `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration, guess quality | Done |
 
 ## Setup
@@ -262,23 +261,39 @@ The oracle gives the exact probability for any position, including shifted
 ones, so a model's calibration and guess quality can be measured under every
 one of these shifts, not just its accuracy against labels.
 
-First check, 150 games on unseen seeds at density 0.21, with each policy
-making every guess (models trained on the earlier 350-game sample):
+Policy shift, 1,000 games on unseen seeds (200,000 to 200,999) at density
+0.21, with the guesser making every forced guess (`--epsilon 0`):
 
-| Guesser | Cleared | Locked | Score | Mine chance of its guesses | Regret |
-| --- | --- | --- | --- | --- | --- |
-| Random | 23.1 | 0.66 | 304 | 0.434 | 0.286 |
-| Logistic, 8 features | 23.8 | 0.43 | 314 | 0.280 | 0.131 |
-| LightGBM, 5×5 window | 23.9 | 0.51 | 315 | 0.276 | 0.131 |
-| Oracle | 24.6 | 0.22 | 327 | 0.226 | 0 |
+| Guesser | Cleared | Locked | Mines hit | Score | Mine chance of its guesses | Regret |
+| --- | --- | --- | --- | --- | --- | --- |
+| Random | 23.1 | 0.6 | 4.34 | 304 | 0.429 | 0.281 |
+| LightGBM, 5×5 window | 23.8 | 0.4 | 3.54 | 316 | 0.267 | 0.114 |
+| CNN, 9×9 window | 24.0 | 0.4 | 3.23 | 318 | 0.246 | 0.069 |
+| CNN, 9×9 window, symmetrized | 24.0 | 0.4 | 3.22 | 318 | 0.240 | 0.060 |
+| Oracle | 24.3 | 0.3 | 2.85 | 323 | 0.223 | 0 |
 
-"Mine chance" is the oracle probability of the cells each policy guessed,
-and regret is how much higher that is than the safest cell available. The
-models' guesses in their own games are about as good as on the fixed test
-set (0.30), so this first check shows no harm from the policy shift.
+"Mine chance" is the oracle probability of the cells the guesser picked, and
+regret is how much higher that is than the safest cell available.
 
-Density shift, with the LightGBM models above scored on 1,000 games simulated
-at densities 0.20 and 0.22 on unseen seeds:
+On the same seeds, LightGBM's score of 316 captures 63% of the oracle's lead
+over random guessing ((316 - 304) / (323 - 304)), and the 9×9 CNN's 318
+captures 74%. With a 19-point gap between random and the oracle, these shares
+have a wide margin of error.
+
+The policy shift is real, and affects both kinds of model. In their own games,
+LightGBM's regret is 0.114 against 0.067 on the fixed test set, and the 9×9
+CNN's (symmetrized) is 0.060 against 0.034. Missed safe cells
+persist: a safe cell the guesser does not take stays on the frontier and is
+passed over again at the next forced guess. The safest cell is the same cell
+as at the previous forced guess in 13% of positions when the oracle plays
+(ties), 56% when the model plays, and 62% when guessing at random. So per-guess
+regret in self-play counts one missed cell several times, and the game score
+is the cleaner summary. The planned fix is to add the positions from the
+model's own games to its training data and retrain (the DAgger approach from
+imitation learning).
+
+Density shift, with the models above scored unchanged on 1,000 games
+simulated at densities 0.20 and 0.22 on unseen seeds (CNN rows symmetrized):
 
 | Window | Density | Excess | Gap closed | ECE | Hit rate | Oracle hit rate |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -292,8 +307,24 @@ at densities 0.20 and 0.22 on unseen seeds:
 | 7×7 | 0.21 (test set) | 0.051 | 47% | 0.008 | 0.283 | 0.217 |
 | 7×7 | 0.22 | 0.048 | 48% | 0.006 | 0.268 | 0.202 |
 
+| CNN window | Density | Excess | Gap closed | ECE | Hit rate | Oracle hit rate |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3×3 | 0.20 | 0.069 | 31% | 0.004 | 0.317 | 0.227 |
+| 3×3 | 0.21 (test set) | 0.065 | 32% | 0.004 | 0.313 | 0.217 |
+| 3×3 | 0.22 | 0.064 | 31% | 0.003 | 0.297 | 0.202 |
+| 5×5 | 0.20 | 0.041 | 58% | 0.008 | 0.277 | 0.227 |
+| 5×5 | 0.21 (test set) | 0.039 | 60% | 0.004 | 0.268 | 0.217 |
+| 5×5 | 0.22 | 0.037 | 60% | 0.003 | 0.253 | 0.202 |
+| 7×7 | 0.20 | 0.034 | 65% | 0.013 | 0.266 | 0.227 |
+| 7×7 | 0.21 (test set) | 0.031 | 68% | 0.005 | 0.258 | 0.217 |
+| 7×7 | 0.22 | 0.030 | 67% | 0.009 | 0.245 | 0.202 |
+| 9×9 | 0.20 | 0.031 | 69% | 0.017 | 0.259 | 0.227 |
+| 9×9 | 0.21 (test set) | 0.029 | 69% | 0.023 | 0.251 | 0.217 |
+| 9×9 | 0.22 | 0.027 | 71% | 0.016 | 0.237 | 0.202 |
+
 The models hold up across the density uncertainty: excess changes by at most
-0.004 and calibration stays under 0.01, even though positions at 0.22 have
+0.004 for every model, LightGBM calibration stays under 0.01 and CNN
+calibration under 0.025, even though positions at 0.22 have
 nearly twice as many candidates as at 0.20. No retraining on mixed densities
 is needed.
 
@@ -369,6 +400,10 @@ chance of hitting a mine; the oracle's own is 0.217 and a random pick's
 | LightGBM, 3×3 window | 0.638 | 0.054 | 43% | 0.005 | 0.289 | 0.071 |
 | LightGBM, 5×5 window | 0.634 | 0.050 | 48% | 0.006 | 0.284 | 0.067 |
 | LightGBM, 7×7 window | 0.635 | 0.051 | 47% | 0.008 | 0.283 | 0.066 |
+| CNN, 3×3 window | 0.649 | 0.065 | 32% | 0.004 | 0.313 | 0.095 |
+| CNN, 5×5 window | 0.622 | 0.039 | 60% | 0.004 | 0.268 | 0.050 |
+| CNN, 7×7 window | 0.614 | 0.031 | 68% | 0.005 | 0.258 | 0.041 |
+| CNN, 9×9 window | 0.613 | 0.029 | 69% | 0.023 | 0.251 | 0.034 |
 
 - LightGBM closes about half the gap to the oracle and is well calibrated
   (ECE under 0.01). Early stopping kept 149, 368 and 264 trees for the 3×3,
@@ -376,6 +411,24 @@ chance of hitting a mine; the oracle's own is 0.217 and a random pick's
 - Going from 3×3 to 5×5 helps; 7×7 adds nothing for the trees. Either the
   information beyond two cells away is small, or trees on one-hot cells cannot
   use it. The CNN tests which.
+
+The CNN rows use `predict(..., symmetrize=True)`, which averages over the 8
+rotations and reflections and lowers excess by 0.003 to 0.006. Without it,
+excess is 0.065, 0.042, 0.036 and 0.034 for windows 3×3 to 9×9.
+
+- The CNN keeps improving with the window, unlike LightGBM: excess falls from
+  0.039 at 5×5 to 0.029 at 9×9, and the 9×9 model closes 69% of the gap to the
+  oracle. So there is useful information beyond two cells away, which trees
+  on one-hot cells could not use.
+- At 3×3 the CNN is worse than LightGBM, which also gets the 8 handcrafted
+  features. From 5×5 on, the CNN is ahead.
+- The 9×9 model is the least calibrated (ECE 0.023), though its rankings, and
+  so its guesses, are the best: its picks hit a mine 25.1% of the time,
+  against 21.7% for the oracle.
+- `models.CNN(layers=L)` sees exactly a (2L + 1)×(2L + 1) window: its 3×3
+  convolutions have no padding, so each layer trims one cell from every side
+  until only the candidate is left. Early stopping chose epochs 13, 6, 4 and
+  3 for 3×3 to 9×9.
 
 ## Findings so far
 
@@ -429,9 +482,8 @@ results/               figures and tables (not tracked)
 
 ## Next steps
 
-1. CNN on the 9×9 window: does it use information the trees cannot?
-2. Policy shift: play 1,000 games with each final model making the guesses
-   (`--policy`) and compare with the fixed test set.
+1. Policy shift: self-play runs for the CNN; retrain with the positions from
+   a model's own games and play 1,000 new games.
 
 ## Later ideas
 
