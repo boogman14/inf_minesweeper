@@ -39,15 +39,17 @@ that a bad guess costs more than the points it forfeits.
 | `board.py` | Infinite board, endless and hardcore rules, sectors, scoring, terminal game | Done |
 | `solver.py` | Deterministic solver that plays every simple certain move; full-game autoplay | Done |
 | `oracle.py` | Exact mine probability for every frontier cell | Done |
-| `screenshots.py` | Reads cleared sectors from app screenshots; `scripts/screenshot_density.py` prints the density estimate | Done |
+| `screenshots.py` | Reads cleared sectors from app screenshots | Done |
 | `simulate.py` | Plays games and logs forced-guess positions as data | Done |
 | `loader.py` | Loads the dataset, splits by game, crops windows | Done |
 | `features.py` | Handcrafted features, one-hot windows, CNN channels, rotations and reflections | Done |
 | `models.py` | Baselines (constant, local ratio, logistic), LightGBM, and a CNN | Done |
+| `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration, guess quality | Done |
 | `plotting.py` | Shared figure style and colors for notebooks and the report | Done |
 | `notebooks/01_exploration.ipynb` | Dataset exploration; saves figures to `results/figures/` | Done |
-| `notebooks/02_modeling.ipynb` | Prediction baselines, trees, and neural net | In progress |
-| `metrics.py` | Log-loss, Brier, excess loss over the oracle, calibration, guess quality | Done |
+| `notebooks/02_modeling.ipynb` | Prediction baselines and models, DAgger experiment; saves tables to `results/` | In progress |
+| `scripts/findings.py` | Recomputes every number in "Findings so far" | Done |
+| `scripts/screenshot_density.py` | Computes and prints the density estimate | Done |
 
 ## Setup
 
@@ -75,7 +77,7 @@ On a machine without a GPU, the much smaller CPU-only build works too:
 pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
 ```
 
-XGBoost can also train on the GPU (`device="cuda"`); LightGBM runs on the CPU.
+The CNN trains on the GPU when one is available; LightGBM runs on the CPU.
 
 If ROS 2 is sourced in the shell, its pytest plugins break the venv's pytest.
 Disable plugin auto-loading for this project:
@@ -127,7 +129,7 @@ budget; uses all CPU cores):
 
 ```bash
 python -m inf_minesweeper.simulate --minutes 5 --out data/raw/guesses.npz
-python -m inf_minesweeper.simulate --games 2000 --out data/raw/guesses.npz
+python -m inf_minesweeper.simulate --games 5000 --out data/raw/guesses.npz
 ```
 
 Test sets for distribution shift use seeds that never appear in training
@@ -148,7 +150,9 @@ python -m inf_minesweeper.simulate --games 1000 --first-seed 200000 --epsilon 0 
     --policy results/lgb5.pkl --out data/raw/played_lgb5.npz
 ```
 
-From Python, `run(..., policy=model.predict)` does the same. Call it from a
+For a CNN, set `model.symmetrize = True` before pickling to make it average
+over the 8 orientations when it plays. From Python,
+`run(..., policy=model.predict)` does the same as `--policy`. Call it from a
 notebook or from a script with an `if __name__ == "__main__":` guard, since
 the worker processes are started fresh and re-import the calling script.
 
@@ -164,7 +168,7 @@ X = crop(d["window"], 5)                     # 5x5 windows from the stored 9x9
 y, q = d["mine"], d["q"]                     # label and oracle probability
 ```
 
-Run the tests (26 tests, about 20 seconds):
+Run the tests (32 tests, about 45 seconds):
 
 ```bash
 pytest
@@ -224,8 +228,8 @@ elsewhere; the position as a whole cannot move without a guess.
 Probabilities quoted on the wiki, such as two-thirds survival in a finned
 box, assume a board with a fixed total number of mines. On an infinite board
 with independent mines there is no total, so layouts with more mines are less
-likely by a factor of $\frac{p}{(1 - p)}$ each, and the same pattern can have different
-odds.
+likely by a factor of $\frac{p}{1 - p}$ each, and the same pattern can have 
+different odds.
 
 ## Missing data
 
@@ -253,10 +257,17 @@ is used beyond that setting:
 
 | Shift | Why it happens | How it is measured or handled |
 | --- | --- | --- |
-| Guessing policy | Training positions come from games guided mostly by the oracle; a model playing on its own reaches positions shaped by its own mistakes. | Play whole games with the model making the guesses (`--policy`) and score those games and the positions they reach. If needed, add those positions to training. |
+| Guessing policy | Training positions come from games guided mostly by the oracle; a model playing on its own reaches positions shaped by its own mistakes. | Play whole games with the model making the guesses (`--policy`) and score those games and the positions they reach; then retrain with those positions (DAgger, below). |
 | Mine density | The app's density is 0.21 with an uncertainty of about ±0.01. | Test sets simulated at 0.20 and 0.22 on unseen seeds. |
 | Simulator vs. app | The simulator simplifies the app (no reopening of locked sectors; its own start). | Density and independent mine placement are checked against app screenshots. |
-| Game stage | Early positions differ from late ones. | Results broken down by guess number within a game. |
+| Game stage | Early positions differ from late ones. | Planned: results broken down by guess number within a game. |
+
+In the terms of Dive into Deep Learning (reference 7), the policy shift is
+mainly covariate shift: the windows a model sees change, while the game's
+rules tie each position to its mine probabilities the same way. It is also a
+feedback loop, since the model's own decisions produce the data it then
+faces. The density shift is not purely covariate: a different density also
+changes the mine probabilities that go with a given window.
 
 The oracle gives the exact probability for any position, including shifted
 ones, so a model's calibration and guess quality can be measured under every
@@ -266,7 +277,7 @@ one of these shifts, not just its accuracy against labels.
 
 1,000 games on unseen seeds (200,000 to 200,999) at density
 0.21, with the guesser making every forced guess (`--epsilon 0`):
-
+ 
 | Guesser | Cleared | Locked | Mines hit | Score | Mine chance of its guesses | Regret |
 | --- | --- | --- | --- | --- | --- | --- |
 | Random | 23.1 | 0.6 | 4.34 | 304 | 0.429 | 0.281 |
@@ -274,15 +285,16 @@ one of these shifts, not just its accuracy against labels.
 | CNN, 9×9 window | 24.0 | 0.4 | 3.23 | 318 | 0.246 | 0.069 |
 | CNN, 9×9 window, symmetrized | 24.0 | 0.4 | 3.22 | 318 | 0.240 | 0.060 |
 | Oracle | 24.3 | 0.3 | 2.85 | 323 | 0.223 | 0 |
-
+ 
 "Mine chance" is the oracle probability of the cells the guesser picked, and
 regret is how much higher that is than the safest cell available.
-
+ 
 On the same seeds, LightGBM's score of 316 captures 63% of the oracle's lead
-over random guessing ((316 - 304) / (323 - 304)), and the 9×9 CNN's 318
-captures 74%. With a 19-point gap between random and the oracle, these shares
-have a wide margin of error.
-
+over random guessing $\frac{316-304}{323-304}$, and the 9×9 CNN's 318
+captures 74%. These shares have a wide margin of error: on seeds 300,000 and
+up (DAgger section below) the same two models capture 76% and 82%, and each
+gain over random carries an interval of about $\pm$ 4.5 points.
+ 
 The policy shift is real, and affects both kinds of model. In their own games,
 LightGBM's regret is 0.114 against 0.067 on the fixed test set, and the 9×9
 CNN's (symmetrized) is 0.060 against 0.034. Missed safe cells
@@ -295,9 +307,16 @@ is the cleaner summary.
 
 ### Retraining on the model's own games (DAgger)
 
-The standard fix for this kind of shift, from imitation learning, is to add
-the positions a model reaches in its own games to its training data and
-retrain. To separate the effect of the right data from the effect of more
+The standard fix for this kind of shift is DAgger (Dataset Aggregation; Ross,
+Gordon and Bagnell, reference 8). It comes from imitation learning, where a
+model learns to copy an expert, and the same problem arises: once the model
+acts on its own, its mistakes lead it into states the expert's data never
+covered. DAgger runs the model, has the expert label the states it actually
+visited, adds them to the training data, and retrains. Here the model's own
+games supply the positions, and the true mines and the oracle supply the
+labels. This project runs one round; the full algorithm repeats the loop.
+
+To separate the effect of the right data from the effect of more
 data, each model is also retrained with a control: the same amount of extra
 data from games the oracle played on the same seeds.
 
@@ -317,7 +336,7 @@ model:
 | LightGBM 5×5 | 0.050 | 48% | 0.006 | 0.284 |
 | LightGBM 5×5, DAgger | 0.049 | 49% | 0.003 | 0.284 |
 | LightGBM 5×5, control | 0.049 | 49% | 0.007 | 0.283 |
-| CNN 9×9, symmetrized | 0.029 | 70% | 0.020 | 0.250 |
+| CNN 9×9, symmetrized (this training run) | 0.029 | 70% | 0.020 | 0.250 |
 | CNN 9×9, DAgger | 0.025 | 74% | 0.010 | 0.247 |
 | CNN 9×9, control | 0.026 | 73% | 0.012 | 0.249 |
 
@@ -325,10 +344,73 @@ LightGBM barely moves with either kind of extra data, so it is limited by
 what trees on one-hot cells can represent. The CNN improves with both, so it
 was still limited by data. DAgger is slightly ahead of the control for the
 CNN, but retraining the CNN alone shifts its scores by a few tenths of a
-point (GPU randomness), so this difference is not conclusive. The real test
-is self-play: all six models, the oracle and random guessing on 1,000 new
-games (seeds 300,000 to 300,999), where DAgger should lower regret in the
-model's own games more than the control does. (Results pending.)
+point (GPU randomness: the same model scored 69% gap closed and ECE 0.023 in
+the "Model results" run), so this difference is not conclusive.
+
+The real test is self-play. All eight guessers played the same 1,000 new games
+(seeds 300,000 to 300,999), with every forced guess made by the guesser:
+ 
+| Guesser | Score | Gain over random (95% CI) | Share of oracle's lead | Locked | Mine chance of its guesses | Regret | Safest cell unchanged |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Random | 303.1 | | 0% | 0.62 | 0.428 | 0.278 | 62% |
+| LightGBM 5×5 | 317.5 | 14.4 ± 4.7 | 76% | 0.44 | 0.267 | 0.113 | 57% |
+| LightGBM 5×5, DAgger | 316.1 | 13.0 ± 4.5 | 69% | 0.44 | 0.267 | 0.110 | 56% |
+| LightGBM 5×5, control | 315.4 | 12.3 ± 4.3 | 65% | 0.48 | 0.265 | 0.111 | 56% |
+| CNN 9×9, symmetrized | 318.5 | 15.4 ± 4.7 | 82% | 0.37 | 0.240 | 0.058 | 47% |
+| CNN 9×9, DAgger | 320.2 | 17.0 ± 4.7 | 90% | 0.34 | 0.238 | 0.055 | 47% |
+| CNN 9×9, control | 320.2 | 17.1 ± 4.8 | 91% | 0.35 | 0.239 | 0.058 | 48% |
+| Oracle | 322.0 | 18.9 ± 4.4 | 100% | 0.29 | 0.224 | 0 | 13% |
+ 
+"Gain over random" is the mean per-game score difference from random guessing
+on the same seeds, with a 95% interval. "Safest cell unchanged" is the share
+of forced guesses whose safest cell is the same cell as at the previous guess.
+ 
+The models without retraining reproduce the earlier self-play run on seeds
+200,000 and up almost exactly (regret 0.114 and 0.060 there), so the policy
+shift is not a quirk of one set of games.
+ 
+**One round of DAgger did not remove the shift.** Regret in the model's own
+games fell by only 0.003 for both models, no more than the control's change.
+Scores moved by a point or two, well inside the ±4 to 5 point intervals, and
+the share of passed-over safe cells (safest cell unchanged) stayed the same:
+56 to 57% for LightGBM, 47 to 48% for the CNN. Two observations explain why:
+ 
+- The model's guesses are not worse in its own games. Their mine chance there
+  (0.267 for LightGBM, 0.240 for the CNN) is no higher than on the fixed test
+  set (0.284 and 0.250). What grows is the gap to the best cell available,
+  because a safe cell the model passes over stays on the frontier and is
+  passed over again at later guesses. The doubled regret is therefore mostly
+  this feedback effect counting the same ranking errors several times, not
+  the model meeting windows it cannot read.
+- DAgger fixes errors caused by unfamiliar inputs. Here the errors are the
+  model's ordinary ranking errors, which more examples of the same kind do not
+  remove: LightGBM barely improved with any extra data, and the CNN improved
+  equally with the model's own games and the oracle's.
+**Several rounds close the gap only slightly.** Full DAgger repeats the loop:
+each round, the current model plays 1,000 games on fresh seeds, those games
+are added to everything collected so far, and the model is retrained. Over
+three rounds with LightGBM 5×5, each model scored on the fixed test set and in
+1,000 self-play games on the same evaluation seeds (300,000 to 300,999):
+ 
+| Round | Extra self-play games in training | Test-set regret | Self-play regret | Gap | Mine chance of its guesses | Score |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 (original) | 0 | 0.067 | 0.113 | 0.046 | 0.267 | 317.5 |
+| 1 | 1,000 | 0.066 | 0.111 | 0.044 | 0.266 | 315.0 |
+| 2 | 2,000 | 0.065 | 0.108 | 0.043 | 0.266 | 317.7 |
+| 3 | 3,000 | 0.064 | 0.107 | 0.043 | 0.265 | 316.5 |
+ 
+Self-play regret falls steadily, by 0.006 over three rounds, but test-set
+regret falls by half as much at the same time, so part of the gain is simply
+more training data. The gap between the two shrinks from 0.046 to 0.043,
+about 7%, and stops shrinking after round 2. Scores move within noise. This
+fits the explanation above: most of the gap is repeated ranking errors, which
+extra self-play data barely reduces. (The multi-round run has no control, so
+it cannot separate the self-play data's contribution from the data's size.)
+ 
+So the way to play better in self-play is a model that ranks cells better in
+general, which is where the CNN's larger window helps, rather than training on
+the model's own positions. The CNN passes over the safest cell less often
+than LightGBM (47% against 57% of positions) and has half its regret.
 
 ### Density shift
 
@@ -389,11 +471,11 @@ cells or icons, were dropped.
 
 ## The dataset
 
-`simulate.py` plays endless games in a 7x7 block of sectors and scores the
-inner 5x5, because sectors on the edge of the play box cannot always be
+`simulate.py` plays endless games in a 7×7 block of sectors and scores the
+inner 5×5, because sectors on the edge of the play box cannot always be
 finished. In each game the solver plays its certain moves, then the oracle
 flags and reveals every cell it can prove. When nothing certain is left, the
-position is a forced guess and every candidate cell becomes one row: its 9x9
+position is a forced guess and every candidate cell becomes one row: its 9×9
 window of visible states, its oracle probability, and whether it is a mine.
 The guess itself is the oracle's safest cell, or a random candidate 20% of
 the time.
@@ -412,7 +494,9 @@ The current dataset comes from 5,000 games, seeds 0 to 4,999
   Mines hit average 3.1 per game, most of them in the outer ring of the play
   box, which is not scored.
 - 72,031 candidate cells (3.4%) were dropped because their component exceeded
-  the oracle's search budget of 200,000 nodes.
+  the oracle's search budget of 200,000 nodes. This dataset predates keeping
+  those rows (see "Missing data"), so they are absent from it; datasets
+  generated since, such as the shift and self-play sets, keep them.
 - Cleared sectors have density 0.2082 and locked sectors 0.2569, against a
   true 0.21: the selection bias described above, measured on this data.
 - A few percent of games end early: the first guess locks the starting sector
@@ -423,8 +507,10 @@ The current dataset comes from 5,000 games, seeds 0 to 4,999
 
 ## Model results
 
-Trained on 3,500 games of the 5,000-game dataset, with 500 games for early
-stopping, and tested on the 1,000 held-out games. "Excess" is the expected
+LightGBM and the CNN are trained on 3,500 games of the 5,000-game dataset,
+with 500 games for early stopping; the baselines, which need no early
+stopping, use all 4,000 training games. Everything is tested on the 1,000
+held-out games. "Excess" is the expected
 log-loss above the oracle's, so 0 is perfect. "Gap closed" is measured from
 the mine-rate constant to the oracle. "ECE" is calibration error. "Hit rate"
 is the oracle probability of the cell each model would guess, so it is the
@@ -465,7 +551,7 @@ excess is 0.065, 0.042, 0.036 and 0.034 for windows 3×3 to 9×9.
 - The 9×9 model is the least calibrated (ECE 0.023), though its rankings, and
   so its guesses, are the best: its picks hit a mine 25.1% of the time,
   against 21.7% for the oracle.
-- `models.CNN(layers=L)` sees exactly a (2L + 1)×(2L + 1) window: its 3×3
+- `models.ConvNeuralNet(layers=L)` sees exactly a (2L + 1)×(2L + 1) window: its 3×3
   convolutions have no padding, so each layer trims one cell from every side
   until only the candidate is left. Early stopping chose epochs 13, 6, 4 and
   3 for 3×3 to 9×9.
@@ -523,12 +609,10 @@ results/               results tables as CSV (tracked); figures and saved
 
 ## Next steps
 
-1. DAgger self-play: play 1,000 games on seeds 300,000 to 300,999 with
-   `lgb5`, `lgb5_dagger`, `lgb5_control`, `cnn9_sym`, `cnn9_dagger`,
-   `cnn9_control`, the oracle and random guessing, and compare scores and
-   regret.
-2. Report figures, including the pinned board plot (model and oracle
+1. Report figures, including the pinned board plot (model and oracle
    probabilities side by side on one position).
+2. Break the test results down by guess number within a game (the
+   game-stage shift).
 
 ## Later ideas
 
@@ -582,5 +666,17 @@ license.
    An infinite-scrolling Minesweeper in Python and Pygame Zero; reference for
    a playable front end. Its code is GPL-3.0, so a front end that copies it
    must also be released under GPL-3.0.
+7. A. Zhang, Z. C. Lipton, M. Li and A. J. Smola, *Dive into Deep Learning*,
+   section 4.7, "Environment and Distribution Shift":
+   https://d2l.ai/chapter_linear-classification/environment-and-distribution-shift.html
+   Types of distribution shift (covariate, label, concept), corrections by
+   reweighting, and feedback loops where a model's decisions change its data.
+8. S. Ross, G. J. Gordon and J. A. Bagnell, "A Reduction of Imitation Learning
+   and Structured Prediction to No-Regret Online Learning," *Proceedings of the
+   14th International Conference on Artificial Intelligence and Statistics
+   (AISTATS)*, PMLR 15:627–635, 2011:
+   https://proceedings.mlr.press/v15/ross11a.html
+   Introduces DAgger, the retraining-on-your-own-mistakes method used in
+   "Retraining on the model's own games (DAgger)".
 
 <!-- Add further references below: papers, videos, solver write-ups. -->

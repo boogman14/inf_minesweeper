@@ -2,8 +2,7 @@
 .vscode/
 data/*
 !data/screenshots
-results/*
-!results/*.csv
+results/*/
 __pycache__/
 .ipynb_checkpoints/
 *.egg-info/
